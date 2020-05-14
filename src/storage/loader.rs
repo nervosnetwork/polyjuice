@@ -4,7 +4,7 @@ use rocksdb::DB;
 use std::convert::TryFrom;
 use std::sync::Arc;
 
-use super::{Key, Value};
+use super::{db_get, value, Key};
 use crate::rpc_client::HttpRpcClient;
 use crate::types::{ContractAddress, ContractChange, ContractCode, LogEntry};
 
@@ -86,63 +86,44 @@ impl Loader {
             .and_then(|key| iter.value().map(|value| (key, value)))
         {
             let key = Key::try_from(key_bytes)?;
-            let value: Value = deserialize(value_bytes).map_err(|err| err.to_string())?;
-            match (key, value) {
-                (
-                    Key::ContractChange {
-                        address,
-                        number,
-                        tx_index,
-                        output_index,
-                    },
-                    Value::ContractChange {
-                        tx_hash,
-                        sender,
-                        new_storage,
-                    },
-                ) => {
-                    let number = number.expect("illegal key");
-                    let tx_index = tx_index.expect("illegal key");
-                    let output_index = output_index.expect("illegal key");
-                    let logs = if load_logs {
-                        let logs_key_bytes = Bytes::from(&Key::ContractLogs {
-                            address: address.clone(),
-                            number: Some(number),
-                            tx_index: Some(tx_index),
-                            output_index: Some(output_index),
-                        });
-                        if let Some(logs_bytes) = self
-                            .db
-                            .get(&logs_key_bytes)
-                            .map_err(|err| err.to_string())?
-                        {
-                            if let Value::ContractLogs(logs) =
-                                deserialize(&logs_bytes).map_err(|err| err.to_string())?
-                            {
-                                logs
-                            } else {
-                                panic!("Corrupted logs value");
-                            }
-                        } else {
-                            Vec::new()
-                        }
-                    } else {
-                        Vec::new()
-                    };
-                    return Ok(ContractChange {
-                        sender,
-                        address,
-                        tx_hash,
-                        new_storage: new_storage.into_iter().collect(),
-                        number,
-                        tx_index,
-                        output_index,
-                        logs,
+            let value: value::ContractChange =
+                deserialize(value_bytes).map_err(|err| err.to_string())?;
+            if let Key::ContractChange {
+                address,
+                number,
+                tx_index,
+                output_index,
+            } = key
+            {
+                let number = number.expect("illegal key");
+                let tx_index = tx_index.expect("illegal key");
+                let output_index = output_index.expect("illegal key");
+                let logs = if load_logs {
+                    let logs_key_bytes = Bytes::from(&Key::ContractLogs {
+                        address: address.clone(),
+                        number: Some(number),
+                        tx_index: Some(tx_index),
+                        output_index: Some(output_index),
                     });
-                }
-                _ => {
-                    panic!("DB corrupted deserialize ContractChange");
-                }
+                    db_get(&self.db, &logs_key_bytes)?
+                        .map(|logs: value::ContractLogs| logs.0)
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                return Ok(ContractChange {
+                    sender: value.sender,
+                    address,
+                    tx_hash: value.tx_hash,
+                    new_storage: value.new_storage.into_iter().collect(),
+                    is_create: value.is_create,
+                    number,
+                    tx_index,
+                    output_index,
+                    logs,
+                });
+            } else {
+                panic!("DB corrupted deserialize ContractChange");
             }
         }
         Err(String::from("Latest contract change not found"))
@@ -158,28 +139,16 @@ impl Loader {
     }
 
     pub fn load_contract_code(&self, address: ContractAddress) -> Result<ContractCode, String> {
-        if let Some(value_bytes) = self
-            .db
-            .get(&Bytes::from(&Key::ContractCode(address.clone())))
-            .map_err(|err| err.to_string())?
-        {
-            if let Value::ContractCode {
-                code,
-                tx_hash,
-                output_index,
-            } = deserialize(&value_bytes).map_err(|err| err.to_string())?
-            {
-                Ok(ContractCode {
-                    address,
-                    code,
-                    tx_hash,
-                    output_index,
-                })
-            } else {
-                panic!("Corrupted contract code value");
-            }
+        let key_bytes = Bytes::from(&Key::ContractCode(address.clone()));
+        if let Some(value) = db_get::<_, value::ContractCode>(&self.db, &key_bytes)? {
+            Ok(ContractCode {
+                address,
+                code: value.code,
+                tx_hash: value.tx_hash,
+                output_index: value.output_index,
+            })
         } else {
-            Err(String::from("Contract code not found"))
+            Err(format!("Contract code not found: {:?}", address))
         }
     }
 

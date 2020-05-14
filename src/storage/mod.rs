@@ -5,12 +5,13 @@ mod runner;
 pub use loader::Loader;
 pub use runner::Runner;
 
+use crate::types::{ContractAddress, EoaAddress};
+use bincode::deserialize;
+use ckb_types::{bytes::Bytes, H160, H256};
+use rocksdb::DB;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::convert::TryFrom;
 use std::mem;
-
-use crate::types::{ContractAddress, EoaAddress};
-use ckb_types::{bytes::Bytes, H160, H256};
-use serde::{Deserialize, Serialize};
 
 type BlockNumber = u64;
 
@@ -28,7 +29,7 @@ pub enum KeyType {
 
     /// Contract state change
     ///   (ContractAddress, BlockNumber, TransactionIndex, OutputIndex)
-    ///      => (TransactionHash, SenderAddress, NewStorageTree, Vec<(Topics, Data)>)
+    ///      => (TransactionHash, SenderAddress, NewStorageTree)
     ContractChange = 0x02,
 
     /// Contract logs
@@ -41,7 +42,7 @@ pub enum KeyType {
     ContractCode = 0x04,
 
     /// Changed contracts in the block (for rollback)
-    ///   BlockNumber => Vec<ContractAddress>
+    ///   BlockNumber => Vec<(ContractAddress, bool)>
     BlockContracts = 0xF0,
 }
 
@@ -242,26 +243,51 @@ impl TryFrom<&[u8]> for Key {
     }
 }
 
-/// Deserialize/Serialize use bincode
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub enum Value {
-    Last {
-        number: BlockNumber,
-        hash: H256,
-    },
-    BlockMap(H256),
-    ContractChange {
-        tx_hash: H256,
-        sender: EoaAddress,
-        new_storage: Vec<(H256, H256)>,
-    },
-    ContractCode {
-        code: Bytes,
+pub mod value {
+    use super::BlockNumber;
+    use crate::types::{ContractAddress, EoaAddress};
+    use ckb_types::{bytes::Bytes, H256};
+    use serde::{Deserialize, Serialize};
+
+    /// Deserialize/Serialize use bincode
+    #[derive(Debug, Clone, Deserialize, Serialize)]
+    pub struct Last {
+        pub number: BlockNumber,
+        pub hash: H256,
+    }
+
+    #[derive(Debug, Clone, Deserialize, Serialize)]
+    pub struct BlockMap(pub H256);
+
+    #[derive(Debug, Clone, Deserialize, Serialize)]
+    pub struct ContractChange {
+        pub tx_hash: H256,
+        pub sender: EoaAddress,
+        pub new_storage: Vec<(H256, H256)>,
+        pub is_create: bool,
+    }
+
+    #[derive(Debug, Clone, Deserialize, Serialize)]
+    pub struct ContractCode {
+        pub code: Bytes,
         /// The hash of the transaction where the contract created
-        tx_hash: H256,
+        pub tx_hash: H256,
         /// The output index of the transaction where the contract created
-        output_index: u32,
-    },
-    ContractLogs(Vec<(Vec<H256>, Bytes)>),
-    BlockContracts(Vec<ContractAddress>),
+        pub output_index: u32,
+    }
+
+    #[derive(Debug, Clone, Deserialize, Serialize)]
+    pub struct ContractLogs(pub Vec<(Vec<H256>, Bytes)>);
+
+    /// For rollback
+    /// If the bool field is true, the contract is created in this block
+    #[derive(Debug, Clone, Deserialize, Serialize)]
+    pub struct BlockContracts(pub Vec<(ContractAddress, bool)>);
+}
+
+fn db_get<K: AsRef<[u8]>, T: DeserializeOwned>(db: &DB, key: K) -> Result<Option<T>, String> {
+    db.get(key)
+        .map_err(|err| err.to_string())?
+        .map(|value_bytes| deserialize(&value_bytes).map_err(|err| err.to_string()))
+        .transpose()
 }

@@ -2,7 +2,7 @@ use ckb_jsonrpc_types::{
     BlockNumber, BlockView, CellOutputWithOutPoint, CellWithStatus, EpochNumber, EpochView,
     HeaderView, OutPoint, Transaction, TransactionWithStatus,
 };
-use ckb_types::{packed, H256};
+use ckb_types::H256;
 
 macro_rules! jsonrpc {
     (
@@ -144,11 +144,11 @@ impl HttpRpcClient {
     // TODO: Make `cell::CellData` public
     pub fn get_live_cell(
         &mut self,
-        out_point: packed::OutPoint,
+        out_point: OutPoint,
         with_data: bool,
     ) -> Result<CellWithStatus, String> {
         self.client
-            .get_live_cell(out_point.into(), with_data)
+            .get_live_cell(out_point, with_data)
             .map_err(|err| err.to_string())
     }
     pub fn get_tip_block_number(&mut self) -> Result<u64, String> {
@@ -167,9 +167,9 @@ impl HttpRpcClient {
     }
 
     // Pool
-    pub fn send_transaction(&mut self, tx: packed::Transaction) -> Result<H256, String> {
+    pub fn send_transaction(&mut self, tx: Transaction) -> Result<H256, String> {
         self.client
-            .send_transaction(tx.into())
+            .send_transaction(tx)
             .map_err(|err| err.to_string())
     }
 }

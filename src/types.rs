@@ -1,9 +1,10 @@
-use crate::storage::{Key, Value};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-
 use ckb_simple_account_layer::RunProofResult;
 use ckb_types::{bytes::Bytes, H160, H256, U256};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::convert::TryFrom;
+
+use crate::storage::{value, Key};
 
 /// A contract account's cell data
 pub struct ContractCell {
@@ -64,6 +65,8 @@ pub struct ContractChange {
     pub tx_hash: H256,
     pub new_storage: HashMap<H256, H256>,
     pub logs: Vec<(Vec<H256>, Bytes)>,
+    /// The change is create the contract
+    pub is_create: bool,
 }
 
 /// The EOA account address.
@@ -121,6 +124,14 @@ impl From<H160> for ContractAddress {
         ContractAddress(inner)
     }
 }
+impl TryFrom<&[u8]> for ContractAddress {
+    type Error = String;
+    fn try_from(source: &[u8]) -> Result<ContractAddress, String> {
+        H160::from_slice(source)
+            .map(ContractAddress)
+            .map_err(|err| err.to_string())
+    }
+}
 impl From<EoaAddress> for H160 {
     fn from(addr: EoaAddress) -> H160 {
         addr.0
@@ -136,8 +147,8 @@ impl ContractCode {
     pub fn db_key(&self) -> Key {
         Key::ContractCode(self.address.clone())
     }
-    pub fn db_value(&self) -> Value {
-        Value::ContractCode {
+    pub fn db_value(&self) -> value::ContractCode {
+        value::ContractCode {
             code: self.code.clone(),
             tx_hash: self.tx_hash.clone(),
             output_index: self.output_index,
@@ -154,11 +165,12 @@ impl ContractChange {
             output_index: Some(self.output_index),
         }
     }
-    pub fn db_value(&self) -> Value {
-        Value::ContractChange {
+    pub fn db_value(&self) -> value::ContractChange {
+        value::ContractChange {
             tx_hash: self.tx_hash.clone(),
             sender: self.sender.clone(),
             new_storage: self.new_storage.clone().into_iter().collect(),
+            is_create: self.is_create,
         }
     }
     pub fn db_key_logs(&self) -> Option<Key> {
@@ -173,11 +185,11 @@ impl ContractChange {
             })
         }
     }
-    pub fn db_value_logs(&self) -> Option<Value> {
+    pub fn db_value_logs(&self) -> Option<value::ContractLogs> {
         if self.logs.is_empty() {
             None
         } else {
-            Some(Value::ContractLogs(self.logs.clone()))
+            Some(value::ContractLogs(self.logs.clone()))
         }
     }
 }
