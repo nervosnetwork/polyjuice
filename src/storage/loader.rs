@@ -135,7 +135,7 @@ impl Loader {
         from_block: Option<u64>,
         to_block: Option<u64>,
     ) -> Result<Vec<ContractChange>, String> {
-        Err(String::from("TODO"))
+        Err(String::from("TODO: Loader::load_contract_changes"))
     }
 
     pub fn load_contract_code(&self, address: ContractAddress) -> Result<ContractCode, String> {
@@ -161,6 +161,6 @@ impl Loader {
         filter_topics: Option<Vec<H256>>,
         _limit: Option<usize>,
     ) -> Result<Vec<LogEntry>, String> {
-        Err(String::from("TODO"))
+        Err(String::from("TODO: Loader::load_logs"))
     }
 }
