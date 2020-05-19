@@ -341,23 +341,17 @@ fn generate_change(
                 .ok_or_else(|| String::from("can not find output_type in witness"))
         })
         .and_then(|witness_data| WitnessData::try_from(witness_data.as_slice()))?;
-    let code_hash_opt = witness_data.program.code.as_ref().map(blake2b_256);
+    let code_hash = blake2b_256(&witness_data.program.code);
     // FIXME: config should load from binary
     let config = Config::default();
     let program_data = witness_data.program_data();
     let mut tree = if let Some((old_storage, input_data)) = contract_inputs.get(address) {
-        if let Some(code_hash) = code_hash_opt.as_ref() {
-            if &code_hash[..] != &input_data[32..64] {
-                return Err(String::from("Code hash in input not match code in witness"));
-            }
-            if &input_data[32..64] != &output_data[32..64] {
-                return Err(String::from(
-                    "input data code hash not match output data code hash",
-                ));
-            }
-        } else {
+        if &code_hash[..] != &input_data[32..64] {
+            return Err(String::from("Code hash in input not match code in witness"));
+        }
+        if &input_data[32..64] != &output_data[32..64] {
             return Err(String::from(
-                "Missing code in program in a CALL transaction",
+                "input data code hash not match output data code hash",
             ));
         }
 

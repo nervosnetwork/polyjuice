@@ -42,14 +42,40 @@ pub struct WitnessData {
     pub run_proof: RunProofResult,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[repr(u8)]
+pub enum CallKind {
+    // < Request CALL.
+    CALL = 0,
+    // < Request DELEGATECALL. Valid since Homestead. The value param ignored.
+    DELEGATECALL = 1,
+    // < Request CALLCODE.
+    CALLCODE = 2,
+    // < Request CREATE.
+    CREATE = 3,
+    // < Request CREATE2. Valid since Constantinople.
+    CREATE2 = 4,
+}
+
 /// Represent an ethereum transaction
 #[derive(Clone)]
 pub struct Program {
-    /// If CREATE contract the input data is constructor and it's parameters (and code is None)
-    /// If  CALL  contract the input data is the parameters for target function (and code is not None)
+    /// The kind of the call. For zero-depth calls ::EVMC_CALL SHOULD be used.
+    pub kind: CallKind,
+    /// Additional flags modifying the call execution behavior.
+    /// In the current version the only valid values are ::EVMC_STATIC or 0.
+    pub flags: u32,
+    /// The call depth.
+    pub depth: u32,
+    /// The sender of the message. (MUST be verified by the signature in witness data)
+    pub sender: EoaAddress,
+    /// The destination of the message (MUST be verified by the script args).
+    pub destination: ContractAddress,
+    /// The code to create/call the contract
+    pub code: Bytes,
+    /// The input data to create/call the contract
     pub input: Bytes,
-    /// The code to run the contract, when create a contract, the code is None
-    pub code: Option<Bytes>,
 }
 
 /// The contract code
@@ -161,14 +187,27 @@ impl TryFrom<&[u8]> for WitnessData {
     }
 }
 
+impl Program {
+    pub fn serialize(&self) -> Bytes {
+        let mut buf = BytesMut::default();
+        buf.put(&[self.kind as u8][..]);
+        buf.put(&self.flags.to_le_bytes()[..]);
+        buf.put(&self.depth.to_le_bytes()[..]);
+        buf.put(self.sender.0.as_bytes());
+        buf.put(self.destination.0.as_bytes());
+
+        buf.put(&(self.code.len() as u32).to_le_bytes()[..]);
+        buf.put(self.code.as_ref());
+        buf.put(&(self.input.len() as u32).to_le_bytes()[..]);
+        buf.put(self.input.as_ref());
+        buf.freeze()
+    }
+}
+
 impl WitnessData {
     pub fn program_data(&self) -> Bytes {
         let mut buf = BytesMut::from(&self.signature[..]);
-        buf.put(&self.program.input.len().to_le_bytes()[..]);
-        buf.put(self.program.input.as_ref());
-        let code = self.program.code.clone().unwrap_or_default();
-        buf.put(&code.len().to_le_bytes()[..]);
-        buf.put(code.as_ref());
+        buf.put(self.program.serialize().as_ref());
         buf.freeze()
     }
 
