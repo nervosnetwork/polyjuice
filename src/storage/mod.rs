@@ -2,14 +2,15 @@ mod indexer;
 mod loader;
 mod runner;
 
+pub use indexer::Indexer;
 pub use loader::Loader;
 pub use runner::Runner;
 
-use crate::types::{ContractAddress, EoaAddress};
+use crate::types::ContractAddress;
 use bincode::deserialize;
-use ckb_types::{bytes::Bytes, H160, H256};
+use ckb_types::{bytes::Bytes, packed, prelude::*, H160, H256};
 use rocksdb::DB;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::de::DeserializeOwned;
 use std::convert::TryFrom;
 use std::mem;
 
@@ -41,9 +42,18 @@ pub enum KeyType {
     ///   ContractAddress => (Code, OutPoint)
     ContractCode = 0x04,
 
-    /// Changed contracts in the block (for rollback)
-    ///   BlockNumber => Vec<(ContractAddress, bool)>
-    BlockContracts = 0xF0,
+    /// Live Cell indexed by lock script hash
+    ///   (LockHash, BlockNumber, TransactionIndex, OutputIndex)
+    ///      => (TransactionHash, OutputIndex)
+    LockLiveCell = 0x05,
+
+    /// Store meta info of a live cell outpoint
+    ///   OutPoint => (BlockNumber, TransactionIndex)
+    LiveCellMap = 0x06,
+
+    /// Delta in the block (for rollback)
+    ///   BlockNumber => value::BlockDelta
+    BlockDelta = 0xF0,
 }
 
 impl TryFrom<u8> for KeyType {
@@ -55,7 +65,9 @@ impl TryFrom<u8> for KeyType {
             0x02 => Ok(KeyType::ContractChange),
             0x03 => Ok(KeyType::ContractLogs),
             0x04 => Ok(KeyType::ContractCode),
-            0xF0 => Ok(KeyType::BlockContracts),
+            0x05 => Ok(KeyType::LockLiveCell),
+            0x06 => Ok(KeyType::LiveCellMap),
+            0xF0 => Ok(KeyType::BlockDelta),
             _ => Err(format!("Invalid KeyType {}", value)),
         }
     }
@@ -82,20 +94,26 @@ pub enum Key {
         output_index: Option<u32>,
     },
     ContractCode(ContractAddress),
-    BlockContracts(BlockNumber),
+    LockLiveCell {
+        lock_hash: H256,
+        number: Option<BlockNumber>,
+        /// Transaction index in current block
+        tx_index: Option<u32>,
+        /// Output index in current transaction
+        output_index: Option<u32>,
+    },
+    LiveCellMap(packed::OutPoint),
+    BlockDelta(BlockNumber),
 }
 
 impl From<&Key> for Bytes {
     fn from(key: &Key) -> Bytes {
-        fn serialize_record_key(
-            key_type: KeyType,
-            address: &ContractAddress,
+        fn serialize_output_pos(
+            bytes: &mut Vec<u8>,
             number: &Option<u64>,
             tx_index: &Option<u32>,
             output_index: &Option<u32>,
-        ) -> Bytes {
-            let mut bytes = vec![key_type as u8];
-            bytes.extend(address.0.as_bytes());
+        ) {
             if let Some(number) = number {
                 bytes.extend(&number.to_be_bytes());
                 if let Some(tx_index) = tx_index {
@@ -105,6 +123,17 @@ impl From<&Key> for Bytes {
                     }
                 }
             }
+        }
+        fn serialize_record_key(
+            key_type: KeyType,
+            address: &ContractAddress,
+            number: &Option<u64>,
+            tx_index: &Option<u32>,
+            output_index: &Option<u32>,
+        ) -> Bytes {
+            let mut bytes = vec![key_type as u8];
+            bytes.extend(address.0.as_bytes());
+            serialize_output_pos(&mut bytes, number, tx_index, output_index);
             bytes.into()
         }
         match key {
@@ -143,8 +172,24 @@ impl From<&Key> for Bytes {
                 bytes.extend(address.0.as_bytes());
                 bytes.into()
             }
-            Key::BlockContracts(number) => {
-                let mut bytes = vec![KeyType::BlockContracts as u8];
+            Key::LockLiveCell {
+                lock_hash,
+                number,
+                tx_index,
+                output_index,
+            } => {
+                let mut bytes = vec![KeyType::LockLiveCell as u8];
+                bytes.extend(lock_hash.as_bytes());
+                serialize_output_pos(&mut bytes, number, tx_index, output_index);
+                bytes.into()
+            }
+            Key::LiveCellMap(out_point) => {
+                let mut bytes = vec![KeyType::LiveCellMap as u8];
+                bytes.extend(out_point.as_slice());
+                bytes.into()
+            }
+            Key::BlockDelta(number) => {
+                let mut bytes = vec![KeyType::BlockDelta as u8];
                 bytes.extend(&number.to_be_bytes());
                 bytes.into()
             }
@@ -185,7 +230,7 @@ impl TryFrom<&[u8]> for Key {
                 + mem::size_of::<u32>()
                 + mem::size_of::<u32>();
             assert_eq!(EXPECTED, 20 + 8 + 4 + 4);
-            ensure_content_len("ContractChange", content, EXPECTED)?;
+            ensure_content_len(name, content, EXPECTED)?;
 
             let address = ContractAddress::from(
                 H160::from_slice(&content[0..20]).expect("deserialize address"),
@@ -234,10 +279,26 @@ impl TryFrom<&[u8]> for Key {
                 );
                 Ok(Key::ContractCode(address))
             }
-            KeyType::BlockContracts => {
-                ensure_content_len("BlockContracts", content, mem::size_of::<BlockNumber>())?;
+            KeyType::LockLiveCell => {
+                let lock_hash = H256::from_slice(&content[0..32]).expect("deserialize address");
+                let number = deserialize_u64(&content[32..40]);
+                let tx_index = deserialize_u32(&content[40..44]);
+                let output_index = deserialize_u32(&content[44..48]);
+                Ok(Key::LockLiveCell {
+                    lock_hash,
+                    number: Some(number),
+                    tx_index: Some(tx_index),
+                    output_index: Some(output_index),
+                })
+            }
+            KeyType::LiveCellMap => {
+                let out_point = packed::OutPoint::from_slice(content).unwrap();
+                Ok(Key::LiveCellMap(out_point))
+            }
+            KeyType::BlockDelta => {
+                ensure_content_len("BlockDelta", content, mem::size_of::<BlockNumber>())?;
                 let number = deserialize_u64(&content[0..8]);
-                Ok(Key::BlockContracts(number))
+                Ok(Key::BlockDelta(number))
             }
         }
     }
@@ -246,7 +307,7 @@ impl TryFrom<&[u8]> for Key {
 pub mod value {
     use super::BlockNumber;
     use crate::types::{ContractAddress, EoaAddress};
-    use ckb_types::{bytes::Bytes, H256};
+    use ckb_types::{bytes::Bytes, packed, prelude::*, H256};
     use serde::{Deserialize, Serialize};
 
     /// Deserialize/Serialize use bincode
@@ -279,10 +340,44 @@ pub mod value {
     #[derive(Debug, Clone, Deserialize, Serialize)]
     pub struct ContractLogs(pub Vec<(Vec<H256>, Bytes)>);
 
-    /// For rollback
-    /// If the bool field is true, the contract is created in this block
+    #[derive(Debug, Clone, Deserialize, Serialize, Hash, Eq, PartialEq)]
+    pub struct LockLiveCell {
+        pub tx_hash: H256,
+        pub output_index: u32,
+        pub capacity: u64,
+    }
+
+    impl LockLiveCell {
+        pub fn out_point(&self) -> packed::OutPoint {
+            packed::OutPoint::new(self.tx_hash.pack(), self.output_index)
+        }
+    }
+    impl From<(packed::OutPoint, u64)> for LockLiveCell {
+        fn from((out_point, capacity): (packed::OutPoint, u64)) -> LockLiveCell {
+            LockLiveCell {
+                tx_hash: out_point.tx_hash().unpack(),
+                output_index: out_point.index().unpack(),
+                capacity,
+            }
+        }
+    }
+
     #[derive(Debug, Clone, Deserialize, Serialize)]
-    pub struct BlockContracts(pub Vec<(ContractAddress, bool)>);
+    pub struct LiveCellMap {
+        pub number: BlockNumber,
+        pub tx_index: u32,
+    }
+
+    /// For rollback
+    #[derive(Debug, Clone, Deserialize, Serialize)]
+    pub struct BlockDelta {
+        /// If the bool field is true, the contract is created in this block
+        pub contracts: Vec<(ContractAddress, bool)>,
+        /// (lock_hash, tx_index, output_index)
+        pub added_cells: Vec<(H256, u32, u32, LockLiveCell)>,
+        /// (lock_hash, tx_index, output_index)
+        pub removed_cells: Vec<(H256, u32, u32, LockLiveCell)>,
+    }
 }
 
 fn db_get<K: AsRef<[u8]>, T: DeserializeOwned>(db: &DB, key: K) -> Result<Option<T>, String> {

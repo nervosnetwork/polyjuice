@@ -1,18 +1,64 @@
 use ckb_hash::blake2b_256;
-use ckb_simple_account_layer::RunProofResult;
+use ckb_jsonrpc_types as rpc_types;
+use ckb_simple_account_layer::{CkbBlake2bHasher, RunProofResult};
 use ckb_types::{
     bytes::{BufMut, Bytes, BytesMut},
-    H160, H256, U256,
+    core::{DepType, EpochNumberWithFraction, ScriptHashType},
+    h256, packed,
+    prelude::*,
+    H160, H256,
 };
 use secp256k1::recovery::{RecoverableSignature, RecoveryId};
 use serde::{Deserialize, Serialize};
+use sparse_merkle_tree::{default_store::DefaultStore, SparseMerkleTree, H256 as SmtH256};
 use std::collections::HashMap;
 use std::convert::TryFrom;
 
 use crate::storage::{value, Key};
 
+pub const ONE_CKB: u64 = 100_000_000;
+pub const MIN_CELL_CAPACITY: u64 = 61 * ONE_CKB;
+pub const SIGHASH_TYPE_HASH: H256 =
+    h256!("0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8");
+pub const GENERATOR_DATA_HASH: H256 =
+    h256!("0x8b362f468b0cba3403adf82f42dff9120a8c99e5e27156724002b01ce39644a9");
+pub const ALWAYS_SUCCESS_CODE_HASH: H256 =
+    h256!("0x28e83a1277d48add8e72fadaa9248559e1b632bab2bd60b27955ebc4c03800a5");
+
+pub const CELLBASE_MATURITY: EpochNumberWithFraction =
+    EpochNumberWithFraction::new_unchecked(4, 0, 1);
+
 lazy_static::lazy_static! {
     pub static ref SECP256K1: secp256k1::Secp256k1<secp256k1::All> = secp256k1::Secp256k1::new();
+    pub static ref SIGHASH_CELL_DEP: packed::CellDep = {
+        let out_point = packed::OutPoint::new_builder()
+            .tx_hash(h256!("0xace5ea83c478bb866edf122ff862085789158f5cbff155b7bb5f13058555b708").pack())
+            .index(0u32.pack())
+            .build();
+        packed::CellDep::new_builder()
+            .out_point(out_point)
+            .dep_type(DepType::DepGroup.into())
+            .build()
+    };
+    pub static ref ALWAYS_SUCCESS_OUT_POINT: packed::OutPoint = {
+        // FIXME: replace this later
+        packed::OutPoint::new_builder()
+            .tx_hash(h256!("0x1111111111111111111111111111111111111111111111111111111111111111").pack())
+            .index(0u32.pack())
+            .build()
+    };
+    pub static ref ALWAYS_SUCCESS_CELL_DEP: packed::CellDep = {
+        packed::CellDep::new_builder()
+            .out_point(ALWAYS_SUCCESS_OUT_POINT.clone())
+            .dep_type(DepType::Code.into())
+            .build()
+    };
+    pub static ref ALWAYS_SUCCESS_SCRIPT: packed::Script = {
+        packed::Script::new_builder()
+            .code_hash(ALWAYS_SUCCESS_CODE_HASH.pack())
+            .hash_type(ScriptHashType::Data.into())
+            .build()
+    };
 }
 
 /// A contract account's cell data
@@ -42,7 +88,7 @@ pub struct WitnessData {
     pub run_proof: RunProofResult,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Hash)]
 #[serde(rename_all = "lowercase")]
 #[repr(u8)]
 pub enum CallKind {
@@ -59,6 +105,7 @@ pub enum CallKind {
 }
 
 /// Represent an ethereum transaction
+// TODO: pub value: U256
 #[derive(Clone)]
 pub struct Program {
     /// The kind of the call. For zero-depth calls ::EVMC_CALL SHOULD be used.
@@ -68,6 +115,7 @@ pub struct Program {
     pub flags: u32,
     /// The call depth.
     pub depth: u32,
+
     /// The sender of the message. (MUST be verified by the signature in witness data)
     pub sender: EoaAddress,
     /// The destination of the message (MUST be verified by the script args).
@@ -120,7 +168,7 @@ pub struct EoaAddress(pub H160);
 ///
 ///     data_1  = first_input.as_slice();
 ///     data_2  = first_output_index_in_current_group.to_le_bytes()
-///     address = blake2b(data_1 ++ data_2)[12..]
+///     address = blake2b(data_1 ++ data_2)[0..20]
 ///
 #[derive(Default, Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ContractAddress(pub H160);
@@ -133,22 +181,15 @@ pub struct LogEntry {
     pub data: Bytes,
 }
 
-/// The transaction receipt, removed fields:
-///   - cumulative_gas_used
-///   - gas_used
+/// The transaction receipt
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransactionReceipt {
-    pub transaction_hash: H256,
-    pub transaction_index: U256,
-    pub block_hash: H256,
-    pub block_number: U256,
-    pub from: EoaAddress,
-    pub to: Option<ContractAddress>,
+    pub tx: rpc_types::Transaction,
+    /// The newly created contract's address (Program.depth=0)
     pub contract_address: Option<ContractAddress>,
+    pub return_data: Bytes,
     pub logs: Vec<LogEntry>,
-    pub logs_bloom: H256,
-    pub status: U256,
 }
 
 impl From<ContractAddress> for H160 {
@@ -183,11 +224,24 @@ impl From<H160> for EoaAddress {
 impl TryFrom<&[u8]> for WitnessData {
     type Error = String;
     fn try_from(data: &[u8]) -> Result<WitnessData, String> {
+        // FIXME: !!!
         Err(String::from("TODO: WitnessData::try_from"))
     }
 }
 
 impl Program {
+    pub fn new_create(sender: EoaAddress, code: Bytes) -> Program {
+        Program {
+            kind: CallKind::CREATE,
+            flags: 0,
+            depth: 0,
+            sender,
+            destination: ContractAddress::default(),
+            code,
+            input: Bytes::default(),
+        }
+    }
+
     pub fn serialize(&self) -> Bytes {
         let mut buf = BytesMut::default();
         buf.put(&[self.kind as u8][..]);
@@ -259,6 +313,17 @@ impl ContractCode {
 }
 
 impl ContractChange {
+    pub fn merkle_tree(
+        &self,
+    ) -> SparseMerkleTree<CkbBlake2bHasher, SmtH256, DefaultStore<SmtH256>> {
+        let mut tree = SparseMerkleTree::default();
+        for (key, value) in &self.new_storage {
+            tree.update(h256_to_smth256(key), h256_to_smth256(value))
+                .unwrap();
+        }
+        tree
+    }
+
     pub fn db_key(&self) -> Key {
         Key::ContractChange {
             address: self.address.clone(),
@@ -290,4 +355,14 @@ impl ContractChange {
     pub fn db_value_logs(&self) -> value::ContractLogs {
         value::ContractLogs(self.logs.clone())
     }
+}
+
+pub fn smth256_to_h256(hash: &SmtH256) -> H256 {
+    H256::from_slice(hash.as_slice()).unwrap()
+}
+
+pub fn h256_to_smth256(hash: &H256) -> SmtH256 {
+    let mut buf = [0u8; 32];
+    buf.copy_from_slice(hash.as_bytes());
+    SmtH256::from(buf)
 }

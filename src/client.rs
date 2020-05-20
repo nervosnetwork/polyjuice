@@ -84,6 +84,12 @@ pub struct HttpRpcClient {
     client: RawHttpRpcClient,
 }
 
+impl Clone for HttpRpcClient {
+    fn clone(&self) -> HttpRpcClient {
+        HttpRpcClient::new(self.url.clone())
+    }
+}
+
 impl HttpRpcClient {
     pub fn new(url: String) -> HttpRpcClient {
         let client = RawHttpRpcClient::new(url.as_str());
@@ -141,7 +147,6 @@ impl HttpRpcClient {
             .get_header_by_number(BlockNumber::from(number))
             .map_err(|err| err.to_string())
     }
-    // TODO: Make `cell::CellData` public
     pub fn get_live_cell(
         &mut self,
         out_point: OutPoint,

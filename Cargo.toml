@@ -19,6 +19,11 @@ rocksdb = "0.14.0"
 failure = "0.1.5"
 secp256k1 = { version = "0.17.2", features = ["recovery"] }
 lazy_static = "1.4"
+ctrlc = { version = "3.1", features = ["termination"] }
+jsonrpc-core = "14.0"
+jsonrpc-derive = "14.0"
+jsonrpc-server-utils = "14.0"
+jsonrpc-http-server = "14.0"
 sparse-merkle-tree = { git = "https://github.com/jjyr/sparse-merkle-tree", rev = "0e313cf" }
 ckb-hash = { git = "https://github.com/nervosnetwork/ckb", tag = "v0.31.0-pre1" }
 ckb-types = { git = "https://github.com/nervosnetwork/ckb", tag = "v0.31.0-pre1" }

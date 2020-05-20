@@ -1,42 +1,53 @@
-use bincode::{deserialize, serialize};
+use bincode::serialize;
 use ckb_hash::blake2b_256;
-use ckb_jsonrpc_types::{JsonBytes, OutPoint, ScriptHashType, Uint32};
-use ckb_simple_account_layer::{run, CkbBlake2bHasher, Config, RunProofResult, RunResult};
-use ckb_types::{bytes::Bytes, h256, packed, prelude::*, H160, H256, U256};
+use ckb_jsonrpc_types::ScriptHashType;
+use ckb_simple_account_layer::{run, CkbBlake2bHasher, Config};
+use ckb_types::{bytes::Bytes, core, packed, prelude::*, H256};
 use rocksdb::{WriteBatch, DB};
-use sparse_merkle_tree::{
-    default_store::DefaultStore, traits::Store, SparseMerkleTree, H256 as SmtH256,
-};
+use sparse_merkle_tree::{default_store::DefaultStore, SparseMerkleTree, H256 as SmtH256};
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
-use std::iter::FromIterator;
 use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 
-use super::{db_get, value, Key, KeyType, Loader};
-use crate::rpc_client::HttpRpcClient;
-use crate::types::{ContractAddress, ContractChange, ContractCode, EoaAddress, WitnessData};
+use super::{db_get, value, Key, Loader};
+use crate::client::HttpRpcClient;
+use crate::types::{
+    h256_to_smth256, smth256_to_h256, ContractAddress, ContractChange, ContractCode, EoaAddress,
+    WitnessData,
+};
+
+pub const TYPE_ARGS_LEN: usize = 20;
+// 32 bytes storage root + 32 bytes code_hash
+pub const OUTPUT_DATA_LEN: usize = 32 + 32;
 
 pub struct Indexer {
     pub db: Arc<DB>,
     pub loader: Loader,
     pub client: HttpRpcClient,
+    pub config: Config,
 }
 
 impl Indexer {
-    pub fn from(db: Arc<DB>, ckb_uri: &str) -> Self {
+    pub fn new(db: Arc<DB>, ckb_uri: &str, config: Config) -> Self {
         let loader = Loader::new(Arc::clone(&db), ckb_uri).unwrap();
         Indexer {
             db,
             loader,
             client: HttpRpcClient::new(ckb_uri.to_string()),
+            config,
         }
     }
 
     // Ideally this should never return. The caller is responsible for wrapping
     // it into a separate thread.
     pub fn index(&mut self) -> Result<(), String> {
+        let type_code_hash: H256 = self.config.type_script.code_hash().unpack();
+        let type_hash_type = {
+            let ty = core::ScriptHashType::try_from(self.config.type_script.hash_type()).unwrap();
+            ScriptHashType::from(ty)
+        };
         let last_block_key_bytes = Bytes::from(&Key::Last);
         loop {
             let value::Last { number, hash } = match db_get(&self.db, &last_block_key_bytes)? {
@@ -52,10 +63,9 @@ impl Indexer {
                 // Rollback
                 Some(_header) => {
                     log::info!("Rollback block, nubmer={}, hash={}", number, hash);
-                    let block_contracts_key = Bytes::from(&Key::BlockContracts(number));
-                    let block_contracts: value::BlockContracts =
-                        db_get(&self.db, &block_contracts_key)?
-                            .unwrap_or_else(|| panic!("Can not load BlockContracts({})", number));
+                    let block_delta_key = Bytes::from(&Key::BlockDelta(number));
+                    let block_delta: value::BlockDelta = db_get(&self.db, &block_delta_key)?
+                        .unwrap_or_else(|| panic!("Can not load BlockDelta({})", number));
                     let last_block_info_opt = if number >= 1 {
                         let last_block_map_key = Bytes::from(&Key::BlockMap(number - 1));
                         let block_hash: value::BlockMap = db_get(&self.db, &last_block_map_key)?
@@ -69,7 +79,7 @@ impl Indexer {
                     };
 
                     let mut batch = WriteBatch::default();
-                    for (address, is_create) in block_contracts.0 {
+                    for (address, is_create) in block_delta.contracts {
                         let change_start_key = Key::ContractChange {
                             address: address.clone(),
                             number: Some(number),
@@ -106,8 +116,29 @@ impl Indexer {
                             batch.delete(&Bytes::from(&Key::ContractCode(address)));
                         }
                     }
+                    for (lock_hash, tx_index, output_index, value) in block_delta.added_cells {
+                        batch.delete(&Bytes::from(&Key::LockLiveCell {
+                            lock_hash,
+                            number: Some(number),
+                            tx_index: Some(tx_index),
+                            output_index: Some(output_index),
+                        }));
+                        batch.delete(&Bytes::from(&Key::LiveCellMap(value.out_point())));
+                    }
+                    for (lock_hash, tx_index, output_index, value) in block_delta.removed_cells {
+                        let key = Key::LockLiveCell {
+                            lock_hash,
+                            number: Some(number),
+                            tx_index: Some(tx_index),
+                            output_index: Some(output_index),
+                        };
+                        batch.put(&Bytes::from(&key), &serialize(&value).unwrap());
+                        let map_key = Key::LiveCellMap(value.out_point());
+                        let map_value = value::LiveCellMap { number, tx_index };
+                        batch.put(&Bytes::from(&map_key), &serialize(&map_value).unwrap());
+                    }
                     batch.delete(&Bytes::from(&Key::BlockMap(number)));
-                    batch.delete(&block_contracts_key);
+                    batch.delete(&block_delta_key);
                     // Update last block info
                     if let Some(block_info) = last_block_info_opt {
                         let value_bytes = serialize(&block_info).map_err(|err| err.to_string())?;
@@ -132,13 +163,8 @@ impl Indexer {
                 }
             };
 
-            // FIXME: load code hash from db later
-            pub const TYPE_CODE_HASH: H256 = h256!("0x1122");
-            pub const TYPE_HASH_TYPE: ScriptHashType = ScriptHashType::Data;
-            pub const TYPE_ARGS_LEN: usize = 20;
-            // 32 bytes storage root + 32 bytes code_hash
-            pub const OUTPUT_DATA_LEN: usize = 32 + 32;
-
+            let mut added_cells: HashSet<(H256, u32, u32, value::LockLiveCell)> = HashSet::new();
+            let mut removed_cells: HashSet<(H256, u32, u32, value::LockLiveCell)> = HashSet::new();
             let mut block_changes: Vec<ContractChange> = Vec::new();
             let mut block_codes: Vec<ContractCode> = Vec::new();
             for (tx_index, (tx, tx_hash)) in next_block
@@ -158,20 +184,22 @@ impl Indexer {
                 let mut contract_outputs: HashMap<usize, (ContractAddress, Bytes)> =
                     HashMap::default();
 
-                for (input_index, input) in tx.inputs.into_iter().enumerate() {
+                for input in tx.inputs {
                     // Information from input
                     //   1. is_create
                     //
                     //   - old storage
-                    let cell_with_status =
-                        self.client.get_live_cell(input.previous_output, true)?;
+                    let cell_with_status = self
+                        .client
+                        .get_live_cell(input.previous_output.clone(), true)?;
                     let cell_info = cell_with_status.cell.unwrap();
                     let output = cell_info.output;
                     let data = cell_info.data.unwrap().content.into_bytes();
+                    let capacity = output.capacity.value();
                     let type_script = output.type_.clone().unwrap_or_default();
                     if data.len() == OUTPUT_DATA_LEN
-                        && type_script.code_hash == TYPE_CODE_HASH
-                        && type_script.hash_type == TYPE_HASH_TYPE
+                        && type_script.code_hash == type_code_hash
+                        && type_script.hash_type == type_hash_type
                         && type_script.args.len() == TYPE_ARGS_LEN
                     {
                         let address = ContractAddress::try_from(type_script.args.as_bytes())
@@ -188,6 +216,20 @@ impl Indexer {
                             panic!("Whey type script is not a type_id script?");
                         }
                     }
+                    let out_point = packed::OutPoint::from(input.previous_output.clone());
+                    let prev_tx_hash = input.previous_output.tx_hash;
+                    let prev_output_index = input.previous_output.index.value();
+                    let lock_hash: H256 = packed::Script::from(output.lock)
+                        .calc_script_hash()
+                        .unpack();
+                    let info: value::LiveCellMap =
+                        db_get(&self.db, &Bytes::from(&Key::LiveCellMap(out_point)))?.unwrap();
+                    let value = value::LockLiveCell {
+                        tx_hash: prev_tx_hash,
+                        output_index: prev_output_index,
+                        capacity,
+                    };
+                    removed_cells.insert((lock_hash, info.tx_index, prev_output_index, value));
                 }
 
                 for (output_index, output) in tx.outputs.into_iter().enumerate() {
@@ -197,8 +239,8 @@ impl Indexer {
                     let data = tx.outputs_data[output_index].clone().into_bytes();
                     let type_script = output.type_.clone().unwrap_or_default();
                     if data.len() == OUTPUT_DATA_LEN
-                        && type_script.code_hash == TYPE_CODE_HASH
-                        && type_script.hash_type == TYPE_HASH_TYPE
+                        && type_script.code_hash == type_code_hash
+                        && type_script.hash_type == type_hash_type
                         && type_script.args.len() == TYPE_ARGS_LEN
                     {
                         let address = ContractAddress::try_from(type_script.args.as_bytes())
@@ -208,6 +250,15 @@ impl Indexer {
                         }
                         contract_outputs.insert(output_index, (address, data));
                     }
+                    let lock_hash: H256 = packed::Script::from(output.lock)
+                        .calc_script_hash()
+                        .unpack();
+                    let value = value::LockLiveCell {
+                        tx_hash: tx_hash.clone(),
+                        output_index: output_index as u32,
+                        capacity: output.capacity.value(),
+                    };
+                    added_cells.insert((lock_hash, tx_index as u32, output_index as u32, value));
                 }
 
                 let mut tx_changes: Vec<ContractChange> = Vec::new();
@@ -225,6 +276,7 @@ impl Indexer {
                         let output_index = witness_index;
                         let is_create = !contract_inputs.contains_key(address);
                         match generate_change(
+                            &self.config,
                             &tx_hash,
                             address,
                             output_data,
@@ -282,7 +334,7 @@ impl Indexer {
                 hash: next_hash.clone(),
             };
             let last_block_info_bytes = serialize(&last_block_info).unwrap();
-            batch.put(&last_block_key_bytes, &last_block_key_bytes);
+            batch.put(&last_block_key_bytes, &last_block_info_bytes);
 
             let mut block_contracts: HashMap<ContractAddress, bool> = HashMap::default();
             for change in block_changes {
@@ -303,21 +355,63 @@ impl Indexer {
                 let db_value_bytes = serialize(&code.db_value()).unwrap();
                 batch.put(&Bytes::from(&code.db_key()), &db_value_bytes);
             }
-            // Key::BlockContracts
-            let block_contracts = block_contracts.into_iter().collect::<Vec<_>>();
-            let block_contracts_bytes = serialize(&value::BlockContracts(block_contracts)).unwrap();
+            // Lock live cell changes
+            let common_cells = added_cells
+                .intersection(&removed_cells)
+                .cloned()
+                .collect::<HashSet<_>>();
+            let added_cells = added_cells
+                .difference(&common_cells)
+                .cloned()
+                .collect::<Vec<_>>();
+            let removed_cells = removed_cells
+                .difference(&common_cells)
+                .cloned()
+                .collect::<Vec<_>>();
+            for (lock_hash, tx_index, output_index, value) in added_cells.clone() {
+                let key = Key::LockLiveCell {
+                    lock_hash,
+                    number: Some(next_number),
+                    tx_index: Some(tx_index),
+                    output_index: Some(output_index),
+                };
+                batch.put(&Bytes::from(&key), &serialize(&value).unwrap());
+                let map_key = Key::LiveCellMap(value.out_point());
+                let map_value = value::LiveCellMap {
+                    number: next_number,
+                    tx_index,
+                };
+                batch.put(&Bytes::from(&map_key), &serialize(&map_value).unwrap());
+            }
+            for (lock_hash, tx_index, output_index, value) in removed_cells.clone() {
+                let key = Key::LockLiveCell {
+                    lock_hash,
+                    number: Some(next_number),
+                    tx_index: Some(tx_index),
+                    output_index: Some(output_index),
+                };
+                batch.delete(&Bytes::from(&key));
+                batch.delete(&Bytes::from(&Key::LiveCellMap(value.out_point())));
+            }
+            // Key::BlockDelta
+            let block_delta = value::BlockDelta {
+                contracts: block_contracts.into_iter().collect::<Vec<_>>(),
+                added_cells,
+                removed_cells,
+            };
+            let block_contracts_bytes = serialize(&block_delta).unwrap();
             batch.put(
-                &Bytes::from(&Key::BlockContracts(next_number)),
+                &Bytes::from(&Key::BlockDelta(next_number)),
                 &block_contracts_bytes,
             );
 
             self.db.write(batch).map_err(|err| err.to_string())?;
         }
-        Ok(())
     }
 }
 
 fn generate_change(
+    config: &Config,
     tx_hash: &H256,
     address: &ContractAddress,
     witness: &Bytes,
@@ -341,11 +435,11 @@ fn generate_change(
                 .ok_or_else(|| String::from("can not find output_type in witness"))
         })
         .and_then(|witness_data| WitnessData::try_from(witness_data.as_slice()))?;
-    let code_hash = blake2b_256(&witness_data.program.code);
-    // FIXME: config should load from binary
-    let config = Config::default();
     let program_data = witness_data.program_data();
-    let mut tree = if let Some((old_storage, input_data)) = contract_inputs.get(address) {
+
+    let (mut tree, code) = if let Some((old_storage, input_data)) = contract_inputs.get(address) {
+        // Call contract
+        let code_hash = blake2b_256(&witness_data.program.code);
         if &code_hash[..] != &input_data[32..64] {
             return Err(String::from("Code hash in input not match code in witness"));
         }
@@ -365,14 +459,22 @@ fn generate_change(
         if &old_root_hash[..] != &input_data[0..32] {
             panic!("Storage root in input_data not match the state");
         }
-        tree
+        (tree, witness_data.program.code.clone())
     } else {
-        SparseMerkleTree::default()
+        let code_hash = blake2b_256(&witness_data.run_proof.return_data);
+        if &code_hash[..] != &output_data[32..64] {
+            return Err(String::from(
+                "return data hash not match output data code hash",
+            ));
+        }
+        (
+            SparseMerkleTree::default(),
+            witness_data.run_proof.return_data.clone(),
+        )
     };
-    let result = run(&config, &tree, &program_data).map_err(|err| err.to_string())?;
+    let result = run(config, &tree, &program_data).map_err(|err| err.to_string())?;
     result.commit(&mut tree).unwrap();
     let new_root_hash: [u8; 32] = (*tree.root()).into();
-    // FIXME: check output data match code hash (return data)
     if &new_root_hash[..] != &output_data[0..32] {
         return Err(String::from(
             "New storage root not match storage root in input data",
@@ -386,19 +488,7 @@ fn generate_change(
         .collect();
 
     let sender = witness_data.recover_sender(tx_hash)?;
-    // FIXME: get logs from RunResult
+    // TODO: get logs from RunResult
     let logs = Vec::new();
-    // FIXME: get code from return data
-    let code = Bytes::default();
     Ok((sender, new_storage, logs, code))
-}
-
-fn smth256_to_h256(hash: &SmtH256) -> H256 {
-    H256::from_slice(hash.as_slice()).unwrap()
-}
-
-fn h256_to_smth256(hash: &H256) -> SmtH256 {
-    let mut buf = [0u8; 32];
-    buf.copy_from_slice(hash.as_bytes());
-    SmtH256::from(buf)
 }

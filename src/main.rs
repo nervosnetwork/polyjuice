@@ -1,17 +1,46 @@
-mod rpc_client;
+mod client;
+mod server;
 mod storage;
 mod types;
 
+use jsonrpc_core::IoHandler;
+use jsonrpc_http_server::ServerBuilder;
+use jsonrpc_server_utils::cors::AccessControlAllowOrigin;
+use jsonrpc_server_utils::hosts::DomainsValidation;
+
+use ckb_simple_account_layer::Config;
 use ckb_types::{
     bytes::{BufMut, Bytes, BytesMut},
-    H160, H256,
+    H160,
 };
 use clap::{App, Arg, SubCommand};
+use log::info;
+use rocksdb::DB;
+use server::{Rpc, RpcImpl};
 use std::fs;
-use types::{CallKind, ContractAddress, EoaAddress, Program};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
+use storage::{Indexer, Loader};
+use types::{
+    CallKind, ContractAddress, EoaAddress, Program, ALWAYS_SUCCESS_OUT_POINT, ALWAYS_SUCCESS_SCRIPT,
+};
 
 fn main() -> Result<(), String> {
+    env_logger::init();
+
     let matches = App::new("polyjuice")
+        .subcommand(
+            SubCommand::with_name("run")
+                .about("Run the polyjuice server")
+                .arg(
+                    Arg::with_name("generator")
+                        .long("generator")
+                        .takes_value(true)
+                        .required(true)
+                        .validator(|input| fs::File::open(input).map(|_| ()).map_err(|err| err.to_string()))
+                        .help("The generator riscv binary")
+                )
+        )
         .subcommand(
             SubCommand::with_name("build-tx")
                 .about("Build and serialize a eth transaction which will put into witness data")
@@ -20,7 +49,7 @@ fn main() -> Result<(), String> {
                         .long("call-kind")
                         .takes_value(true)
                         .default_value("call")
-                        .possible_values(&["create", "create2", "call", "callcode"])
+                        .possible_values(&["create", "call"])
                         .help("The kind of the call")
                 )
                 .arg(Arg::with_name("static").long("static").help("Is static call"))
@@ -73,6 +102,56 @@ fn main() -> Result<(), String> {
         ).get_matches();
 
     match matches.subcommand() {
+        ("run", Some(m)) => {
+            let generator = fs::read(m.value_of("generator").unwrap())
+                .map(Bytes::from)
+                .map_err(|err| err.to_string())?;
+            let mut config = Config::default();
+            config.generator = generator;
+            // FIXME: use real script later
+            config.validator_outpoint = ALWAYS_SUCCESS_OUT_POINT.clone();
+            // FIXME: use real script later
+            config.type_script = ALWAYS_SUCCESS_SCRIPT.clone();
+
+            let db = Arc::new(DB::open_default("./data").expect("rocksdb"));
+            let ckb_uri = "http://127.0.0.1:8114";
+            let loader = Arc::new(Loader::new(Arc::clone(&db), ckb_uri).expect("loader failure"));
+            let mut indexer = Indexer::new(Arc::clone(&db), ckb_uri, config.clone());
+            let _ = thread::spawn(move || indexer.index().expect("indexer faliure"));
+
+            let mut io_handler = IoHandler::new();
+            io_handler.extend_with(
+                RpcImpl {
+                    loader: Arc::clone(&loader),
+                    config,
+                }
+                .to_delegate(),
+            );
+
+            let rpc_server = ServerBuilder::new(io_handler)
+                .cors(DomainsValidation::AllowOnly(vec![
+                    AccessControlAllowOrigin::Null,
+                    AccessControlAllowOrigin::Any,
+                ]))
+                .threads(4)
+                .max_request_body_size(10_485_760)
+                .start_http(&"127.0.0.1:8214".parse().expect("parse listen address"))
+                .expect("jsonrpc initialize");
+
+            // Wait for exit
+            let exit = Arc::new((Mutex::new(()), Condvar::new()));
+            let e = Arc::clone(&exit);
+            ctrlc::set_handler(move || {
+                e.1.notify_all();
+            })
+            .expect("error setting Ctrl-C handler");
+            let _guard = exit
+                .1
+                .wait(exit.0.lock().expect("locking"))
+                .expect("waiting");
+            rpc_server.close();
+            info!("exiting...");
+        }
         ("build-tx", Some(m)) => {
             let signature = m
                 .value_of("signature")
@@ -137,7 +216,7 @@ fn parse_h160(input: &str) -> Result<H160, String> {
 fn parse_hex_binary(input: &str) -> Result<Vec<u8>, String> {
     hex::decode(input)
         .map_err(|err| err.to_string())
-        .or_else(|err| {
+        .or_else(|_err| {
             let content = fs::read_to_string(input).map_err(|err| err.to_string())?;
             hex::decode(&content).map_err(|err| err.to_string())
         })
