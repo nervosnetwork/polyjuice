@@ -110,9 +110,9 @@ impl From<&Key> for Bytes {
     fn from(key: &Key) -> Bytes {
         fn serialize_output_pos(
             bytes: &mut Vec<u8>,
-            number: &Option<u64>,
-            tx_index: &Option<u32>,
-            output_index: &Option<u32>,
+            number: Option<u64>,
+            tx_index: Option<u32>,
+            output_index: Option<u32>,
         ) {
             if let Some(number) = number {
                 bytes.extend(&number.to_be_bytes());
@@ -127,9 +127,9 @@ impl From<&Key> for Bytes {
         fn serialize_record_key(
             key_type: KeyType,
             address: &ContractAddress,
-            number: &Option<u64>,
-            tx_index: &Option<u32>,
-            output_index: &Option<u32>,
+            number: Option<u64>,
+            tx_index: Option<u32>,
+            output_index: Option<u32>,
         ) -> Bytes {
             let mut bytes = vec![key_type as u8];
             bytes.extend(address.0.as_bytes());
@@ -151,9 +151,9 @@ impl From<&Key> for Bytes {
             } => serialize_record_key(
                 KeyType::ContractChange,
                 address,
-                number,
-                tx_index,
-                output_index,
+                *number,
+                *tx_index,
+                *output_index,
             ),
             Key::ContractLogs {
                 address,
@@ -163,9 +163,9 @@ impl From<&Key> for Bytes {
             } => serialize_record_key(
                 KeyType::ContractLogs,
                 address,
-                number,
-                tx_index,
-                output_index,
+                *number,
+                *tx_index,
+                *output_index,
             ),
             Key::ContractCode(address) => {
                 let mut bytes = vec![KeyType::ContractCode as u8];
@@ -180,7 +180,7 @@ impl From<&Key> for Bytes {
             } => {
                 let mut bytes = vec![KeyType::LockLiveCell as u8];
                 bytes.extend(lock_hash.as_bytes());
-                serialize_output_pos(&mut bytes, number, tx_index, output_index);
+                serialize_output_pos(&mut bytes, *number, *tx_index, *output_index);
                 bytes.into()
             }
             Key::LiveCellMap(out_point) => {

@@ -1,6 +1,6 @@
 use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types as rpc_types;
-use ckb_simple_account_layer::{CkbBlake2bHasher, RunProofResult};
+use ckb_simple_account_layer::CkbBlake2bHasher;
 use ckb_types::{
     bytes::{BufMut, Bytes, BytesMut},
     core::{DepType, EpochNumberWithFraction, ScriptHashType},
@@ -73,19 +73,26 @@ pub struct ContractCell {
 /// NOTE:
 ///   - Cannot put this witness in lock field
 ///   - May not work with Nervos DAO
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WitnessData {
     /// The signature of CKB transaction.
+    ///     data_1 = [0u8; 65]
+    ///     data_2 = program.len() ++ program
+    ///     data_3 = return_data.len() ++ return_data
+    ///     program_data = data_1 ++ data_2 ++ data_3
     ///
     ///     data_1 = tx_hash
-    ///     data_2 = init_witness([0u8; 65] ++ program ++ run_proof)
-    ///     signature = sign_recoverable(data_1 ++ data_2)
+    ///     data_2 = program_data.len() ++ program_data
+    ///     data_3 = run_proof
+    ///     signature = sign_recoverable(data_1 ++ data_2 ++ data_3)
     ///
-    pub signature: [u8; 65],
-    /// The ethereum transaction(program) to run.
+    pub signature: Bytes,
+    /// The ethereum program(transaction) to run.
     pub program: Program,
+    /// The return data
+    pub return_data: Bytes,
     /// Provide storage diff and diff proofs.
-    pub run_proof: RunProofResult,
+    pub run_proof: Bytes,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Hash)]
@@ -106,7 +113,7 @@ pub enum CallKind {
 
 /// Represent an ethereum transaction
 // TODO: pub value: U256
-#[derive(Clone)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Program {
     /// The kind of the call. For zero-depth calls ::EVMC_CALL SHOULD be used.
     pub kind: CallKind,
@@ -221,11 +228,38 @@ impl From<H160> for EoaAddress {
     }
 }
 
+impl Default for CallKind {
+    fn default() -> CallKind {
+        CallKind::CALL
+    }
+}
+
 impl TryFrom<&[u8]> for WitnessData {
     type Error = String;
     fn try_from(data: &[u8]) -> Result<WitnessData, String> {
-        // FIXME: !!!
-        Err(String::from("TODO: WitnessData::try_from"))
+        let mut offset = 0;
+        let (signature, program, return_data) = {
+            let program_data = load_var_slice(data, &mut offset)?;
+            let mut inner_offset = 0;
+            let mut signature = [0u8; 65];
+            let tmp = load_slice_with_length(program_data, 65, &mut inner_offset)?;
+            signature.copy_from_slice(tmp.as_ref());
+            let program_slice = load_var_slice(program_data, &mut inner_offset)?;
+            let program = Program::try_from(program_slice)?;
+            let return_data = load_var_slice(program_data, &mut inner_offset)?;
+            (
+                Bytes::from(signature[..].to_vec()),
+                program,
+                Bytes::from(return_data.to_vec()),
+            )
+        };
+        let run_proof = Bytes::from(data[offset..].to_vec());
+        Ok(WitnessData {
+            signature,
+            program,
+            return_data,
+            run_proof,
+        })
     }
 }
 
@@ -258,25 +292,78 @@ impl Program {
     }
 }
 
+impl TryFrom<&[u8]> for Program {
+    type Error = String;
+    fn try_from(data: &[u8]) -> Result<Program, String> {
+        // Make sure access data[0] not panic
+        if data.is_empty() {
+            return Err(format!(
+                "Not enough data length for parse Program: {}",
+                data.len()
+            ));
+        }
+
+        let kind = CallKind::try_from(data[0])?;
+        let mut offset: usize = 1;
+        let flags = load_u32(data, &mut offset)?;
+        let depth = load_u32(data, &mut offset)?;
+        let sender = EoaAddress(load_h160(data, &mut offset)?);
+        let destination = ContractAddress(load_h160(data, &mut offset)?);
+        let code = load_var_slice(data, &mut offset)?;
+        let input = load_var_slice(data, &mut offset)?;
+        if !data[offset..].is_empty() {
+            return Err(format!("To much data for parse Program: {}", data.len()));
+        }
+        Ok(Program {
+            kind,
+            flags,
+            depth,
+            sender,
+            destination,
+            code: Bytes::from(code.to_vec()),
+            input: Bytes::from(input.to_vec()),
+        })
+    }
+}
+
+impl TryFrom<u8> for CallKind {
+    type Error = String;
+    fn try_from(value: u8) -> Result<CallKind, String> {
+        match value {
+            0 => Ok(CallKind::CALL),
+            1 => Ok(CallKind::DELEGATECALL),
+            2 => Ok(CallKind::CALLCODE),
+            3 => Ok(CallKind::CREATE),
+            4 => Ok(CallKind::CREATE2),
+            _ => Err(format!("Invalid call kind: {}", value)),
+        }
+    }
+}
+
 impl WitnessData {
     pub fn program_data(&self) -> Bytes {
         let mut buf = BytesMut::from(&self.signature[..]);
-        buf.put(self.program.serialize().as_ref());
+        let program = self.program.serialize();
+        buf.put(&(program.len() as u32).to_le_bytes()[..]);
+        buf.put(program.as_ref());
+        buf.put(&(self.return_data.len() as u32).to_le_bytes()[..]);
+        buf.put(self.return_data.as_ref());
         buf.freeze()
     }
 
-    pub fn unsigned_data(&self, tx_hash: &H256) -> Result<Bytes, String> {
+    /// unsigned_data = tx_hash ++ program.len() ++ program ++ run_proof
+    pub fn unsigned_data(&self, tx_hash: &H256) -> Bytes {
         let mut program_data = self.program_data();
         let mut data = BytesMut::from(tx_hash.as_bytes());
+        data.put(&(program_data.len() as u32).to_le_bytes()[..]);
         data.put(&[0u8; 32][..]);
         data.put(&program_data.as_ref()[32..]);
-        self.run_proof
-            .serialize(&data.freeze())
-            .map_err(|err| err.to_string())
+        data.put(self.run_proof.as_ref());
+        data.freeze()
     }
 
     pub fn recover_pubkey(&self, tx_hash: &H256) -> Result<secp256k1::PublicKey, String> {
-        let unsigned_data = self.unsigned_data(tx_hash)?;
+        let unsigned_data = self.unsigned_data(tx_hash);
         let message = secp256k1::Message::from_slice(&blake2b_256(&unsigned_data)[..])
             .map_err(|err| err.to_string())?;
 
@@ -365,4 +452,88 @@ pub fn h256_to_smth256(hash: &H256) -> SmtH256 {
     let mut buf = [0u8; 32];
     buf.copy_from_slice(hash.as_bytes());
     SmtH256::from(buf)
+}
+
+pub fn load_u32(data: &[u8], offset: &mut usize) -> Result<u32, String> {
+    let offset_value = *offset;
+    if data[offset_value..].len() < 4 {
+        return Err(format!(
+            "Not enough data length to parse u32: data.len={}, offset={}",
+            data.len(),
+            offset
+        ));
+    }
+    let mut buf = [0u8; 4];
+    buf.copy_from_slice(&data[offset_value..offset_value + 4]);
+    *offset += 4;
+    Ok(u32::from_le_bytes(buf))
+}
+
+pub fn load_h160(data: &[u8], offset: &mut usize) -> Result<H160, String> {
+    let offset_value = *offset;
+    if data[offset_value..].len() < 20 {
+        return Err(format!(
+            "Not enough data length to parse H160: data.len={}, offset={}",
+            data.len(),
+            offset_value
+        ));
+    }
+    let inner = H160::from_slice(&data[offset_value..offset_value + 20]).unwrap();
+    *offset += 20;
+    Ok(inner)
+}
+
+pub fn load_slice_with_length<'a>(
+    data: &'a [u8],
+    length: u32,
+    offset: &mut usize,
+) -> Result<&'a [u8], String> {
+    let offset_value = *offset;
+    let length = length as usize;
+    if data[offset_value..].len() < length {
+        return Err(format!(
+            "Not enough data length to parse Bytes: data.len={}, length={}, offset={}",
+            data.len(),
+            length,
+            offset_value
+        ));
+    }
+    let target = &data[offset_value..offset_value + length];
+    *offset += length;
+    Ok(target)
+}
+
+pub fn load_var_slice<'a>(data: &'a [u8], offset: &mut usize) -> Result<&'a [u8], String> {
+    let length = load_u32(data, offset)?;
+    load_slice_with_length(data, length, offset)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use ckb_simple_account_layer::RunProofResult;
+
+    #[test]
+    fn test_serde_program() {
+        let program1 = Program::new_create(Default::default(), Bytes::from("abcdef"));
+        let binary = program1.serialize();
+        let program2 = Program::try_from(binary.as_ref()).unwrap();
+        assert_eq!(program1, program2);
+    }
+
+    #[test]
+    fn test_serde_witness_data() {
+        let run_proof = RunProofResult::default();
+        let run_proof_data = run_proof.serialize_pure().unwrap();
+        let witness_data1 = WitnessData {
+            signature: Bytes::from([1u8; 65].to_vec()),
+            program: Program::new_create(Default::default(), Bytes::from("abcdef")),
+            return_data: Bytes::from("return data"),
+            run_proof: Bytes::from(run_proof_data),
+        };
+        let program_data = witness_data1.program_data();
+        let binary = run_proof.serialize(&program_data).unwrap();
+        let witness_data2 = WitnessData::try_from(binary.as_ref()).unwrap();
+        assert_eq!(witness_data1, witness_data2);
+    }
 }

@@ -51,7 +51,10 @@ impl Runner {
 
     pub fn call(&mut self) -> Result<TransactionReceipt, String> {
         if self.program.kind != CallKind::CREATE || self.program.flags != 0 {
-            return Err(format!("Expect CALL, found call kind: {:?}", self.program.kind).into());
+            return Err(format!(
+                "Expect CALL, found call kind: {:?}",
+                self.program.kind
+            ));
         }
         Err(format!("TODO: Runner::call"))
     }
@@ -63,7 +66,7 @@ impl Runner {
         // TODO: let user choose the lock
         let contract_lock_script = ALWAYS_SUCCESS_SCRIPT.clone();
 
-        let tx_fee = 1 * ONE_CKB;
+        let tx_fee = ONE_CKB;
         let output_capacity = 200 * ONE_CKB;
         let (live_cells, total_capacity) = self
             .loader

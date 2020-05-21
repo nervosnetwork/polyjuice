@@ -440,10 +440,10 @@ fn generate_change(
     let (mut tree, code) = if let Some((old_storage, input_data)) = contract_inputs.get(address) {
         // Call contract
         let code_hash = blake2b_256(&witness_data.program.code);
-        if &code_hash[..] != &input_data[32..64] {
+        if code_hash[..] != input_data[32..64] {
             return Err(String::from("Code hash in input not match code in witness"));
         }
-        if &input_data[32..64] != &output_data[32..64] {
+        if input_data[32..64] != output_data[32..64] {
             return Err(String::from(
                 "input data code hash not match output data code hash",
             ));
@@ -456,26 +456,26 @@ fn generate_change(
                 .unwrap();
         }
         let old_root_hash: [u8; 32] = (*tree.root()).into();
-        if &old_root_hash[..] != &input_data[0..32] {
+        if old_root_hash[..] != input_data[0..32] {
             panic!("Storage root in input_data not match the state");
         }
         (tree, witness_data.program.code.clone())
     } else {
-        let code_hash = blake2b_256(&witness_data.run_proof.return_data);
-        if &code_hash[..] != &output_data[32..64] {
+        let code_hash = blake2b_256(&witness_data.return_data);
+        if code_hash[..] != output_data[32..64] {
             return Err(String::from(
                 "return data hash not match output data code hash",
             ));
         }
         (
             SparseMerkleTree::default(),
-            witness_data.run_proof.return_data.clone(),
+            witness_data.return_data.clone(),
         )
     };
     let result = run(config, &tree, &program_data).map_err(|err| err.to_string())?;
     result.commit(&mut tree).unwrap();
     let new_root_hash: [u8; 32] = (*tree.root()).into();
-    if &new_root_hash[..] != &output_data[0..32] {
+    if new_root_hash[..] != output_data[0..32] {
         return Err(String::from(
             "New storage root not match storage root in input data",
         ));
