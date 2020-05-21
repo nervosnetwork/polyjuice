@@ -250,7 +250,8 @@ impl TryFrom<&[u8]> for Key {
             KeyType::Last => Ok(Key::Last),
             KeyType::BlockMap => {
                 ensure_content_len("BlockMap", content, mem::size_of::<BlockNumber>())?;
-                Ok(Key::Last)
+                let number = deserialize_u64(content);
+                Ok(Key::BlockMap(number))
             }
             KeyType::ContractChange => {
                 let (address, number, tx_index, output_index) =
@@ -385,4 +386,42 @@ fn db_get<K: AsRef<[u8]>, T: DeserializeOwned>(db: &DB, key: K) -> Result<Option
         .map_err(|err| err.to_string())?
         .map(|value_bytes| deserialize(&value_bytes).map_err(|err| err.to_string()))
         .transpose()
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_key_serde() {
+        for key1 in vec![
+            Key::Last,
+            Key::BlockMap(3),
+            Key::ContractChange {
+                address: Default::default(),
+                number: Some(333),
+                tx_index: Some(2),
+                output_index: Some(64),
+            },
+            Key::ContractLogs {
+                address: Default::default(),
+                number: Some(444),
+                tx_index: Some(3),
+                output_index: Some(64),
+            },
+            Key::ContractCode(Default::default()),
+            Key::LockLiveCell {
+                lock_hash: Default::default(),
+                number: Some(666),
+                tx_index: Some(4),
+                output_index: Some(55),
+            },
+            Key::LiveCellMap(packed::OutPoint::default()),
+            Key::BlockDelta(8),
+        ] {
+            let binary = Bytes::from(&key1);
+            let key2 = Key::try_from(binary.as_ref()).unwrap();
+            assert_eq!(key1, key2);
+        }
+    }
 }
