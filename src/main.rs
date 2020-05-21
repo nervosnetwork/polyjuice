@@ -8,7 +8,7 @@ use jsonrpc_http_server::ServerBuilder;
 use jsonrpc_server_utils::cors::AccessControlAllowOrigin;
 use jsonrpc_server_utils::hosts::DomainsValidation;
 
-use ckb_simple_account_layer::Config;
+use ckb_jsonrpc_types as json_types;
 use ckb_types::{
     bytes::{BufMut, Bytes, BytesMut},
     H160,
@@ -16,14 +16,13 @@ use ckb_types::{
 use clap::{App, Arg, SubCommand};
 use log::info;
 use rocksdb::DB;
+use serde::{Deserialize, Serialize};
 use server::{Rpc, RpcImpl};
 use std::fs;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use storage::{Indexer, Loader};
-use types::{
-    CallKind, ContractAddress, EoaAddress, Program, ALWAYS_SUCCESS_OUT_POINT, ALWAYS_SUCCESS_SCRIPT,
-};
+use types::{CallKind, ContractAddress, EoaAddress, Program, RunConfig};
 
 fn main() -> Result<(), String> {
     env_logger::init();
@@ -39,6 +38,14 @@ fn main() -> Result<(), String> {
                         .required(true)
                         .validator(|input| fs::File::open(input).map(|_| ()).map_err(|err| err.to_string()))
                         .help("The generator riscv binary")
+                )
+                .arg(
+                    Arg::with_name("config")
+                        .long("config")
+                        .takes_value(true)
+                        .required(true)
+                        .validator(|input| fs::File::open(input).map(|_| ()).map_err(|err| err.to_string()))
+                        .help("The config (json)")
                 )
         )
         .subcommand(
@@ -106,24 +113,30 @@ fn main() -> Result<(), String> {
             let generator = fs::read(m.value_of("generator").unwrap())
                 .map(Bytes::from)
                 .map_err(|err| err.to_string())?;
-            let mut config = Config::default();
-            config.generator = generator;
-            // FIXME: use real script later
-            config.validator_outpoint = ALWAYS_SUCCESS_OUT_POINT.clone();
-            // FIXME: use real script later
-            config.type_script = ALWAYS_SUCCESS_SCRIPT.clone();
+            let config_json: RunConfigJson = fs::read_to_string(m.value_of("config").unwrap())
+                .map(|json_string| {
+                    serde_json::from_str(json_string.as_str()).map_err(|err| err.to_string())
+                })
+                .map_err(|err| err.to_string())??;
+            let run_config = RunConfig {
+                generator,
+                type_dep: config_json.type_dep.into(),
+                type_script: config_json.type_script.into(),
+                lock_dep: config_json.lock_dep.into(),
+                lock_script: config_json.lock_script.into(),
+            };
 
             let db = Arc::new(DB::open_default("./data").expect("rocksdb"));
             let ckb_uri = "http://127.0.0.1:8114";
             let loader = Arc::new(Loader::new(Arc::clone(&db), ckb_uri).expect("loader failure"));
-            let mut indexer = Indexer::new(Arc::clone(&db), ckb_uri, config.clone());
+            let mut indexer = Indexer::new(Arc::clone(&db), ckb_uri, run_config.clone());
             let _ = thread::spawn(move || indexer.index().expect("indexer faliure"));
 
             let mut io_handler = IoHandler::new();
             io_handler.extend_with(
                 RpcImpl {
                     loader: Arc::clone(&loader),
-                    config,
+                    run_config,
                 }
                 .to_delegate(),
             );
@@ -220,4 +233,16 @@ fn parse_hex_binary(input: &str) -> Result<Vec<u8>, String> {
             let content = fs::read_to_string(input).map_err(|err| err.to_string())?;
             hex::decode(&content).map_err(|err| err.to_string())
         })
+}
+
+// Can deploy those scripts by:
+//     ckb-cli wallet transfer --data-path xxx
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RunConfigJson {
+    // Type script (Validator)
+    pub type_dep: json_types::CellDep,
+    pub type_script: json_types::Script,
+    // Lock script
+    pub lock_dep: json_types::CellDep,
+    pub lock_script: json_types::Script,
 }

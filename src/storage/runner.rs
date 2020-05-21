@@ -3,8 +3,8 @@ use ckb_jsonrpc_types as rpc_types;
 use ckb_simple_account_layer::{run, Config};
 use ckb_types::{
     bytes::{BufMut, Bytes, BytesMut},
-    core::{DepType, ScriptHashType, TransactionBuilder},
-    packed::{BytesOpt, CellDep, CellInput, CellOutput, Script, ScriptOpt, WitnessArgs},
+    core::{ScriptHashType, TransactionBuilder},
+    packed::{BytesOpt, CellInput, CellOutput, Script, ScriptOpt, WitnessArgs},
     prelude::*,
     H160,
 };
@@ -12,21 +12,21 @@ use std::error::Error as StdError;
 
 use super::Loader;
 use crate::types::{
-    CallKind, ContractAddress, Program, TransactionReceipt, ALWAYS_SUCCESS_SCRIPT,
+    CallKind, ContractAddress, Program, RunConfig, TransactionReceipt, ALWAYS_SUCCESS_SCRIPT,
     MIN_CELL_CAPACITY, ONE_CKB, SIGHASH_CELL_DEP, SIGHASH_TYPE_HASH,
 };
 
 pub struct Runner {
     pub loader: Loader,
-    pub config: Config,
+    pub run_config: RunConfig,
     pub program: Program,
 }
 
 impl Runner {
-    pub fn new(loader: Loader, config: Config, program: Program) -> Runner {
+    pub fn new(loader: Loader, run_config: RunConfig, program: Program) -> Runner {
         Runner {
             loader,
-            config,
+            run_config,
             program,
         }
     }
@@ -44,8 +44,9 @@ impl Runner {
             .merkle_tree();
         let mut program_data = BytesMut::from(&[0u8; 65][..]);
         program_data.put(self.program.serialize().as_ref());
-        let result = run(&self.config, &latest_tree, &program_data.freeze())
-            .map_err(|err| err.to_string())?;
+        let config: Config = (&self.run_config).into();
+        let result =
+            run(&config, &latest_tree, &program_data.freeze()).map_err(|err| err.to_string())?;
         Ok(result.return_data)
     }
 
@@ -79,7 +80,8 @@ impl Runner {
         let latest_tree = latest_change.merkle_tree();
         let program_data = self.program_data();
 
-        let result = run(&self.config, &latest_tree, &program_data)?;
+        let config: Config = (&self.run_config).into();
+        let result = run(&config, &latest_tree, &program_data)?;
         let proof = result.generate_proof(&latest_tree)?;
         let root_hash = result.committed_root_hash(&latest_tree)?;
 
@@ -101,7 +103,7 @@ impl Runner {
             .map(ContractAddress)
             .unwrap();
         let contract_type_script = self
-            .config
+            .run_config
             .type_script
             .clone()
             .as_builder()
@@ -124,14 +126,9 @@ impl Runner {
         let mut output_data = BytesMut::from(root_hash.as_slice());
         output_data.put(&blake2b_256(result.return_data.as_ref())[..]);
 
-        let validator_cell_dep = CellDep::new_builder()
-            .out_point(self.config.validator_outpoint.clone())
-            .dep_type(DepType::Code.into())
-            .build();
-
         let mut transaction_builder = TransactionBuilder::default()
             .cell_dep(SIGHASH_CELL_DEP.clone())
-            .cell_dep(validator_cell_dep)
+            .cell_dep(self.run_config.type_dep.clone())
             .inputs(inputs.pack())
             .witness(witness.as_bytes().pack())
             .output(output)

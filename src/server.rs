@@ -1,7 +1,6 @@
 use crate::storage::{Loader, Runner};
-use crate::types::{EoaAddress, Program, TransactionReceipt};
+use crate::types::{EoaAddress, Program, RunConfig, TransactionReceipt};
 use ckb_jsonrpc_types::JsonBytes;
-use ckb_simple_account_layer::Config;
 use ckb_types::H160;
 use jsonrpc_core::{Error, ErrorCode, Result};
 use jsonrpc_derive::rpc;
@@ -22,15 +21,15 @@ pub trait Rpc {
 
 pub struct RpcImpl {
     pub loader: Arc<Loader>,
-    pub config: Config,
+    pub run_config: RunConfig,
 }
 
 impl Rpc for RpcImpl {
     fn create(&self, sender: H160, code: JsonBytes) -> Result<TransactionReceipt> {
         let loader = Loader::clone(&self.loader);
-        let config = self.config.clone();
+        let run_config = self.run_config.clone();
         let program = Program::new_create(EoaAddress(sender), code.into_bytes());
-        let mut runner = Runner::new(loader, config, program);
+        let mut runner = Runner::new(loader, run_config, program);
         runner.create().map_err(convert_err)
     }
 }

@@ -1,6 +1,6 @@
 use ckb_hash::blake2b_256;
-use ckb_jsonrpc_types as rpc_types;
-use ckb_simple_account_layer::CkbBlake2bHasher;
+use ckb_jsonrpc_types as json_types;
+use ckb_simple_account_layer::{CkbBlake2bHasher, Config};
 use ckb_types::{
     bytes::{BufMut, Bytes, BytesMut},
     core::{DepType, EpochNumberWithFraction, ScriptHashType},
@@ -59,6 +59,17 @@ lazy_static::lazy_static! {
             .hash_type(ScriptHashType::Data.into())
             .build()
     };
+}
+
+#[derive(Debug, Clone)]
+pub struct RunConfig {
+    pub generator: Bytes,
+    // Type script (validator)
+    pub type_dep: packed::CellDep,
+    pub type_script: packed::Script,
+    // Lock script
+    pub lock_dep: packed::CellDep,
+    pub lock_script: packed::Script,
 }
 
 /// A contract account's cell data
@@ -192,11 +203,21 @@ pub struct LogEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransactionReceipt {
-    pub tx: rpc_types::Transaction,
+    pub tx: json_types::Transaction,
     /// The newly created contract's address (Program.depth=0)
     pub contract_address: Option<ContractAddress>,
     pub return_data: Bytes,
     pub logs: Vec<LogEntry>,
+}
+
+impl From<&RunConfig> for Config {
+    fn from(cfg: &RunConfig) -> Config {
+        let mut config = Config::default();
+        config.generator = cfg.generator.clone();
+        config.validator_outpoint = cfg.type_dep.out_point();
+        config.type_script = cfg.type_script.clone();
+        config
+    }
 }
 
 impl From<ContractAddress> for H160 {

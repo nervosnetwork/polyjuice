@@ -15,7 +15,7 @@ use super::{db_get, value, Key, Loader};
 use crate::client::HttpRpcClient;
 use crate::types::{
     h256_to_smth256, smth256_to_h256, ContractAddress, ContractChange, ContractCode, EoaAddress,
-    WitnessData,
+    RunConfig, WitnessData,
 };
 
 pub const TYPE_ARGS_LEN: usize = 20;
@@ -26,26 +26,27 @@ pub struct Indexer {
     pub db: Arc<DB>,
     pub loader: Loader,
     pub client: HttpRpcClient,
-    pub config: Config,
+    pub run_config: RunConfig,
 }
 
 impl Indexer {
-    pub fn new(db: Arc<DB>, ckb_uri: &str, config: Config) -> Self {
+    pub fn new(db: Arc<DB>, ckb_uri: &str, run_config: RunConfig) -> Self {
         let loader = Loader::new(Arc::clone(&db), ckb_uri).unwrap();
         Indexer {
             db,
             loader,
             client: HttpRpcClient::new(ckb_uri.to_string()),
-            config,
+            run_config,
         }
     }
 
     // Ideally this should never return. The caller is responsible for wrapping
     // it into a separate thread.
     pub fn index(&mut self) -> Result<(), String> {
-        let type_code_hash: H256 = self.config.type_script.code_hash().unpack();
+        let type_code_hash: H256 = self.run_config.type_script.code_hash().unpack();
         let type_hash_type = {
-            let ty = core::ScriptHashType::try_from(self.config.type_script.hash_type()).unwrap();
+            let ty =
+                core::ScriptHashType::try_from(self.run_config.type_script.hash_type()).unwrap();
             ScriptHashType::from(ty)
         };
         let last_block_key_bytes = Bytes::from(&Key::Last);
@@ -276,7 +277,7 @@ impl Indexer {
                         let output_index = witness_index;
                         let is_create = !contract_inputs.contains_key(address);
                         match generate_change(
-                            &self.config,
+                            &self.run_config,
                             &tx_hash,
                             address,
                             output_data,
@@ -411,7 +412,7 @@ impl Indexer {
 }
 
 fn generate_change(
-    config: &Config,
+    run_config: &RunConfig,
     tx_hash: &H256,
     address: &ContractAddress,
     witness: &Bytes,
@@ -472,7 +473,9 @@ fn generate_change(
             witness_data.return_data.clone(),
         )
     };
-    let result = run(config, &tree, &program_data).map_err(|err| err.to_string())?;
+
+    let config: Config = run_config.into();
+    let result = run(&config, &tree, &program_data).map_err(|err| err.to_string())?;
     result.commit(&mut tree).unwrap();
     let new_root_hash: [u8; 32] = (*tree.root()).into();
     if new_root_hash[..] != output_data[0..32] {
