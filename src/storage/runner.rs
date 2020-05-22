@@ -1,6 +1,6 @@
 use ckb_hash::{blake2b_256, new_blake2b};
-use ckb_jsonrpc_types as rpc_types;
-use ckb_simple_account_layer::{run, Config};
+use ckb_jsonrpc_types as json_types;
+use ckb_simple_account_layer::{run, CkbBlake2bHasher, Config};
 use ckb_types::{
     bytes::{BufMut, Bytes, BytesMut},
     core::{ScriptHashType, TransactionBuilder},
@@ -8,6 +8,7 @@ use ckb_types::{
     prelude::*,
     H160,
 };
+use sparse_merkle_tree::{default_store::DefaultStore, SparseMerkleTree, H256 as SmtH256};
 use std::error::Error as StdError;
 
 use super::Loader;
@@ -72,12 +73,8 @@ impl Runner {
         let (live_cells, total_capacity) = self
             .loader
             .collect_cells(self.program.sender.clone(), tx_fee + output_capacity)?;
-        let latest_change = self.loader.load_latest_contract_change(
-            self.program.destination.clone(),
-            None,
-            false,
-        )?;
-        let latest_tree = latest_change.merkle_tree();
+        let latest_tree: SparseMerkleTree<CkbBlake2bHasher, SmtH256, DefaultStore<SmtH256>> =
+            Default::default();
         let program_data = self.program_data();
 
         let config: Config = (&self.run_config).into();
@@ -152,11 +149,10 @@ impl Runner {
                 .output_data(Bytes::default().pack());
         }
         let tx = transaction_builder.build();
-        let rpc_tx = rpc_types::Transaction::from(tx.data());
+        let rpc_tx = json_types::Transaction::from(tx.data());
         Ok(TransactionReceipt {
             tx: rpc_tx,
             contract_address: Some(contract_address),
-            return_data: result.return_data,
             // TODO: parse `result.logs`
             logs: Vec::new(),
         })

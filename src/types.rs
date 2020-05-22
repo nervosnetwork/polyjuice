@@ -20,8 +20,6 @@ pub const ONE_CKB: u64 = 100_000_000;
 pub const MIN_CELL_CAPACITY: u64 = 61 * ONE_CKB;
 pub const SIGHASH_TYPE_HASH: H256 =
     h256!("0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8");
-pub const GENERATOR_DATA_HASH: H256 =
-    h256!("0x8b362f468b0cba3403adf82f42dff9120a8c99e5e27156724002b01ce39644a9");
 pub const ALWAYS_SUCCESS_CODE_HASH: H256 =
     h256!("0x28e83a1277d48add8e72fadaa9248559e1b632bab2bd60b27955ebc4c03800a5");
 
@@ -206,7 +204,6 @@ pub struct TransactionReceipt {
     pub tx: json_types::Transaction,
     /// The newly created contract's address (Program.depth=0)
     pub contract_address: Option<ContractAddress>,
-    pub return_data: Bytes,
     pub logs: Vec<LogEntry>,
 }
 

@@ -47,6 +47,14 @@ fn main() -> Result<(), String> {
                         .validator(|input| fs::File::open(input).map(|_| ()).map_err(|err| err.to_string()))
                         .help("The config (json)")
                 )
+                .arg(
+                    Arg::with_name("url")
+                        .long("url")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("http://127.0.0.1:8114")
+                        .help("The ckb rpc url")
+                )
         )
         .subcommand(
             SubCommand::with_name("build-tx")
@@ -125,9 +133,9 @@ fn main() -> Result<(), String> {
                 lock_dep: config_json.lock_dep.into(),
                 lock_script: config_json.lock_script.into(),
             };
+            let ckb_uri = m.value_of("url").unwrap();
 
             let db = Arc::new(DB::open_default("./data").expect("rocksdb"));
-            let ckb_uri = "http://127.0.0.1:8114";
             let loader = Arc::new(Loader::new(Arc::clone(&db), ckb_uri).expect("loader failure"));
             let mut indexer = Indexer::new(Arc::clone(&db), ckb_uri, run_config.clone());
             let _ = thread::spawn(move || indexer.index().expect("indexer faliure"));
@@ -141,6 +149,7 @@ fn main() -> Result<(), String> {
                 .to_delegate(),
             );
 
+            let rpc_url = "127.0.0.1:8214";
             let rpc_server = ServerBuilder::new(io_handler)
                 .cors(DomainsValidation::AllowOnly(vec![
                     AccessControlAllowOrigin::Null,
@@ -148,8 +157,9 @@ fn main() -> Result<(), String> {
                 ]))
                 .threads(4)
                 .max_request_body_size(10_485_760)
-                .start_http(&"127.0.0.1:8214".parse().expect("parse listen address"))
+                .start_http(&rpc_url.parse().expect("parse listen address"))
                 .expect("jsonrpc initialize");
+            log::info!("RPC server listen on: {}", rpc_url);
 
             // Wait for exit
             let exit = Arc::new((Mutex::new(()), Condvar::new()));
@@ -163,7 +173,7 @@ fn main() -> Result<(), String> {
                 .wait(exit.0.lock().expect("locking"))
                 .expect("waiting");
             rpc_server.close();
-            info!("exiting...");
+            log::info!("exiting...");
         }
         ("build-tx", Some(m)) => {
             let signature = m

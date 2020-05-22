@@ -51,108 +51,114 @@ impl Indexer {
         };
         let last_block_key_bytes = Bytes::from(&Key::Last);
         loop {
-            let value::Last { number, hash } = match db_get(&self.db, &last_block_key_bytes)? {
-                Some(last) => last,
-                None => value::Last {
-                    number: 0,
-                    hash: self.client.get_block_hash(0)?.expect("get genesis hash"),
-                },
-            };
+            let next_header = if let Some(value::Last { number, hash }) =
+                db_get(&self.db, &last_block_key_bytes)?
+            {
+                match self.client.get_header_by_number(number + 1)? {
+                    Some(header) if header.inner.parent_hash == hash => header,
+                    // Rollback
+                    Some(_header) => {
+                        log::info!("Rollback block, nubmer={}, hash={}", number, hash);
+                        let block_delta_key = Bytes::from(&Key::BlockDelta(number));
+                        let block_delta: value::BlockDelta = db_get(&self.db, &block_delta_key)?
+                            .unwrap_or_else(|| panic!("Can not load BlockDelta({})", number));
+                        let last_block_info_opt = if number >= 1 {
+                            let last_block_map_key = Bytes::from(&Key::BlockMap(number - 1));
+                            let block_hash: value::BlockMap =
+                                db_get(&self.db, &last_block_map_key)?.unwrap_or_else(|| {
+                                    panic!("Can not load BlockMap({})", number - 1)
+                                });
+                            Some(value::Last {
+                                number: number - 1,
+                                hash: block_hash.0,
+                            })
+                        } else {
+                            None
+                        };
 
-            let next_header = match self.client.get_header_by_number(number + 1)? {
-                Some(header) if header.inner.parent_hash == hash => header,
-                // Rollback
-                Some(_header) => {
-                    log::info!("Rollback block, nubmer={}, hash={}", number, hash);
-                    let block_delta_key = Bytes::from(&Key::BlockDelta(number));
-                    let block_delta: value::BlockDelta = db_get(&self.db, &block_delta_key)?
-                        .unwrap_or_else(|| panic!("Can not load BlockDelta({})", number));
-                    let last_block_info_opt = if number >= 1 {
-                        let last_block_map_key = Bytes::from(&Key::BlockMap(number - 1));
-                        let block_hash: value::BlockMap = db_get(&self.db, &last_block_map_key)?
-                            .unwrap_or_else(|| panic!("Can not load BlockMap({})", number - 1));
-                        Some(value::Last {
-                            number: number - 1,
-                            hash: block_hash.0,
-                        })
-                    } else {
-                        None
-                    };
-
-                    let mut batch = WriteBatch::default();
-                    for (address, is_create) in block_delta.contracts {
-                        let change_start_key = Key::ContractChange {
-                            address: address.clone(),
-                            number: Some(number),
-                            tx_index: None,
-                            output_index: None,
-                        };
-                        let change_end_key = Key::ContractChange {
-                            address: address.clone(),
-                            number: Some(number + 1),
-                            tx_index: None,
-                            output_index: None,
-                        };
-                        let logs_start_key = Key::ContractLogs {
-                            address: address.clone(),
-                            number: Some(number),
-                            tx_index: None,
-                            output_index: None,
-                        };
-                        let logs_end_key = Key::ContractLogs {
-                            address: address.clone(),
-                            number: Some(number + 1),
-                            tx_index: None,
-                            output_index: None,
-                        };
-                        batch.delete_range(
-                            &Bytes::from(&change_start_key),
-                            &Bytes::from(&change_end_key),
-                        );
-                        batch.delete_range(
-                            &Bytes::from(&logs_start_key),
-                            &Bytes::from(&logs_end_key),
-                        );
-                        if is_create {
-                            batch.delete(&Bytes::from(&Key::ContractCode(address)));
+                        let mut batch = WriteBatch::default();
+                        for (address, is_create) in block_delta.contracts {
+                            let change_start_key = Key::ContractChange {
+                                address: address.clone(),
+                                number: Some(number),
+                                tx_index: None,
+                                output_index: None,
+                            };
+                            let change_end_key = Key::ContractChange {
+                                address: address.clone(),
+                                number: Some(number + 1),
+                                tx_index: None,
+                                output_index: None,
+                            };
+                            let logs_start_key = Key::ContractLogs {
+                                address: address.clone(),
+                                number: Some(number),
+                                tx_index: None,
+                                output_index: None,
+                            };
+                            let logs_end_key = Key::ContractLogs {
+                                address: address.clone(),
+                                number: Some(number + 1),
+                                tx_index: None,
+                                output_index: None,
+                            };
+                            batch.delete_range(
+                                &Bytes::from(&change_start_key),
+                                &Bytes::from(&change_end_key),
+                            );
+                            batch.delete_range(
+                                &Bytes::from(&logs_start_key),
+                                &Bytes::from(&logs_end_key),
+                            );
+                            if is_create {
+                                batch.delete(&Bytes::from(&Key::ContractCode(address)));
+                            }
                         }
+                        for (lock_hash, tx_index, output_index, value) in block_delta.added_cells {
+                            batch.delete(&Bytes::from(&Key::LockLiveCell {
+                                lock_hash,
+                                number: Some(number),
+                                tx_index: Some(tx_index),
+                                output_index: Some(output_index),
+                            }));
+                            batch.delete(&Bytes::from(&Key::LiveCellMap(value.out_point())));
+                        }
+                        for (lock_hash, old_number, tx_index, output_index, value) in
+                            block_delta.removed_cells
+                        {
+                            let key = Key::LockLiveCell {
+                                lock_hash,
+                                number: Some(old_number),
+                                tx_index: Some(tx_index),
+                                output_index: Some(output_index),
+                            };
+                            batch.put(&Bytes::from(&key), &serialize(&value).unwrap());
+                            let map_key = Key::LiveCellMap(value.out_point());
+                            let map_value = value::LiveCellMap {
+                                number: old_number,
+                                tx_index,
+                            };
+                            batch.put(&Bytes::from(&map_key), &serialize(&map_value).unwrap());
+                        }
+                        batch.delete(&Bytes::from(&Key::BlockMap(number)));
+                        batch.delete(&block_delta_key);
+                        // Update last block info
+                        if let Some(block_info) = last_block_info_opt {
+                            let value_bytes =
+                                serialize(&block_info).map_err(|err| err.to_string())?;
+                            batch.put(&last_block_key_bytes, &value_bytes);
+                        }
+                        self.db.write(batch).map_err(|err| err.to_string())?;
+                        continue;
                     }
-                    for (lock_hash, tx_index, output_index, value) in block_delta.added_cells {
-                        batch.delete(&Bytes::from(&Key::LockLiveCell {
-                            lock_hash,
-                            number: Some(number),
-                            tx_index: Some(tx_index),
-                            output_index: Some(output_index),
-                        }));
-                        batch.delete(&Bytes::from(&Key::LiveCellMap(value.out_point())));
+                    None => {
+                        // Reach the tip, wait 200ms for next block
+                        sleep(Duration::from_millis(200));
+                        continue;
                     }
-                    for (lock_hash, tx_index, output_index, value) in block_delta.removed_cells {
-                        let key = Key::LockLiveCell {
-                            lock_hash,
-                            number: Some(number),
-                            tx_index: Some(tx_index),
-                            output_index: Some(output_index),
-                        };
-                        batch.put(&Bytes::from(&key), &serialize(&value).unwrap());
-                        let map_key = Key::LiveCellMap(value.out_point());
-                        let map_value = value::LiveCellMap { number, tx_index };
-                        batch.put(&Bytes::from(&map_key), &serialize(&map_value).unwrap());
-                    }
-                    batch.delete(&Bytes::from(&Key::BlockMap(number)));
-                    batch.delete(&block_delta_key);
-                    // Update last block info
-                    if let Some(block_info) = last_block_info_opt {
-                        let value_bytes = serialize(&block_info).map_err(|err| err.to_string())?;
-                        batch.put(&last_block_key_bytes, &value_bytes);
-                    }
-                    self.db.write(batch).map_err(|err| err.to_string())?;
-                    continue;
                 }
-                None => {
-                    // Reach the tip, wait 200ms for next block
-                    sleep(Duration::from_millis(200));
-                    continue;
-                }
+            } else {
+                self.client.get_header_by_number(0)?.unwrap()
             };
 
             let next_block = match self.client.get_block(next_header.hash.clone())? {
@@ -164,16 +170,30 @@ impl Indexer {
                 }
             };
 
+            let next_number = next_header.inner.number.value();
+            let next_hash = next_header.hash;
+
+            log::info!(
+                "Process block: hash={:#x}, number={}",
+                next_hash,
+                next_number
+            );
+
             let mut added_cells: HashSet<(H256, u32, u32, value::LockLiveCell)> = HashSet::new();
-            let mut removed_cells: HashSet<(H256, u32, u32, value::LockLiveCell)> = HashSet::new();
+            let mut removed_cells: HashSet<(H256, u64, u32, u32, value::LockLiveCell)> =
+                HashSet::new();
             let mut block_changes: Vec<ContractChange> = Vec::new();
             let mut block_codes: Vec<ContractCode> = Vec::new();
+            let mut block_added_cells: HashMap<value::LockLiveCell, value::LiveCellMap> =
+                HashMap::default();
+            let mut block_removed_cells: HashSet<value::LockLiveCell> = HashSet::default();
             for (tx_index, (tx, tx_hash)) in next_block
                 .transactions
                 .into_iter()
                 .map(|tx| (tx.inner, tx.hash))
                 .enumerate()
             {
+                log::debug!("process tx: hash={:#x}, tx_index: {}", tx_hash, tx_index);
                 // Information from upper level
                 //   1. block number
                 //   2. tx_hash
@@ -190,12 +210,18 @@ impl Indexer {
                     //   1. is_create
                     //
                     //   - old storage
-                    let cell_with_status = self
+                    if input.previous_output.tx_hash == H256::default() {
+                        continue;
+                    }
+                    let prev_tx = self
                         .client
-                        .get_live_cell(input.previous_output.clone(), true)?;
-                    let cell_info = cell_with_status.cell.unwrap();
-                    let output = cell_info.output;
-                    let data = cell_info.data.unwrap().content.into_bytes();
+                        .get_transaction(input.previous_output.tx_hash.clone())?
+                        .unwrap()
+                        .transaction
+                        .inner;
+                    let prev_index = input.previous_output.index.value() as usize;
+                    let output = prev_tx.outputs[prev_index].clone();
+                    let data = prev_tx.outputs_data[prev_index].clone().into_bytes();
                     let capacity = output.capacity.value();
                     let type_script = output.type_.clone().unwrap_or_default();
                     if data.len() == OUTPUT_DATA_LEN
@@ -223,14 +249,25 @@ impl Indexer {
                     let lock_hash: H256 = packed::Script::from(output.lock)
                         .calc_script_hash()
                         .unpack();
-                    let info: value::LiveCellMap =
-                        db_get(&self.db, &Bytes::from(&Key::LiveCellMap(out_point)))?.unwrap();
                     let value = value::LockLiveCell {
                         tx_hash: prev_tx_hash,
                         output_index: prev_output_index,
                         capacity,
                     };
-                    removed_cells.insert((lock_hash, info.tx_index, prev_output_index, value));
+                    let info: value::LiveCellMap =
+                        block_added_cells.get(&value).cloned().unwrap_or_else(|| {
+                            db_get(&self.db, &Bytes::from(&Key::LiveCellMap(out_point.clone())))
+                                .unwrap()
+                                .unwrap()
+                        });
+                    block_removed_cells.insert(value.clone());
+                    removed_cells.insert((
+                        lock_hash,
+                        info.number,
+                        info.tx_index,
+                        prev_output_index,
+                        value,
+                    ));
                 }
 
                 for (output_index, output) in tx.outputs.into_iter().enumerate() {
@@ -259,6 +296,13 @@ impl Indexer {
                         output_index: output_index as u32,
                         capacity: output.capacity.value(),
                     };
+                    block_added_cells.insert(
+                        value.clone(),
+                        value::LiveCellMap {
+                            number: next_number,
+                            tx_index: tx_index as u32,
+                        },
+                    );
                     added_cells.insert((lock_hash, tx_index as u32, output_index as u32, value));
                 }
 
@@ -291,7 +335,7 @@ impl Indexer {
                                     is_create,
                                     logs,
                                     address: address.clone(),
-                                    number,
+                                    number: next_number,
                                     tx_hash: tx_hash.clone(),
                                     tx_index: tx_index as u32,
                                     output_index: output_index as u32,
@@ -317,9 +361,6 @@ impl Indexer {
                 block_changes.extend(tx_changes);
                 block_codes.extend(tx_codes);
             }
-
-            let next_number = next_header.inner.number.value();
-            let next_hash = next_header.hash;
 
             let mut batch = WriteBatch::default();
             // Key::BlockMap
@@ -356,20 +397,22 @@ impl Indexer {
                 let db_value_bytes = serialize(&code.db_value()).unwrap();
                 batch.put(&Bytes::from(&code.db_key()), &db_value_bytes);
             }
-            // Lock live cell changes
-            let common_cells = added_cells
-                .intersection(&removed_cells)
+            let common_cells = block_added_cells
+                .keys()
+                .cloned()
+                .collect::<HashSet<_>>()
+                .intersection(&block_removed_cells)
                 .cloned()
                 .collect::<HashSet<_>>();
-            let added_cells = added_cells
-                .difference(&common_cells)
-                .cloned()
-                .collect::<Vec<_>>();
-            let removed_cells = removed_cells
-                .difference(&common_cells)
-                .cloned()
-                .collect::<Vec<_>>();
             for (lock_hash, tx_index, output_index, value) in added_cells.clone() {
+                if common_cells.contains(&value) {
+                    continue;
+                }
+                log::debug!(
+                    "Add live cell: tx_hash={:#x}, index={}",
+                    value.tx_hash,
+                    value.output_index
+                );
                 let key = Key::LockLiveCell {
                     lock_hash,
                     number: Some(next_number),
@@ -384,10 +427,18 @@ impl Indexer {
                 };
                 batch.put(&Bytes::from(&map_key), &serialize(&map_value).unwrap());
             }
-            for (lock_hash, tx_index, output_index, value) in removed_cells.clone() {
+            for (lock_hash, number, tx_index, output_index, value) in removed_cells.clone() {
+                if common_cells.contains(&value) {
+                    continue;
+                }
+                log::debug!(
+                    "Remove live cell: tx_hash={:#x}, index={}",
+                    value.tx_hash,
+                    value.output_index
+                );
                 let key = Key::LockLiveCell {
                     lock_hash,
-                    number: Some(next_number),
+                    number: Some(number),
                     tx_index: Some(tx_index),
                     output_index: Some(output_index),
                 };
@@ -397,8 +448,8 @@ impl Indexer {
             // Key::BlockDelta
             let block_delta = value::BlockDelta {
                 contracts: block_contracts.into_iter().collect::<Vec<_>>(),
-                added_cells,
-                removed_cells,
+                added_cells: added_cells.into_iter().collect::<Vec<_>>(),
+                removed_cells: removed_cells.into_iter().collect::<Vec<_>>(),
             };
             let block_contracts_bytes = serialize(&block_delta).unwrap();
             batch.put(

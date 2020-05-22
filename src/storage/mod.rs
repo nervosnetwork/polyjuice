@@ -376,8 +376,8 @@ pub mod value {
         pub contracts: Vec<(ContractAddress, bool)>,
         /// (lock_hash, tx_index, output_index)
         pub added_cells: Vec<(H256, u32, u32, LockLiveCell)>,
-        /// (lock_hash, tx_index, output_index)
-        pub removed_cells: Vec<(H256, u32, u32, LockLiveCell)>,
+        /// (lock_hash, number, tx_index, output_index)
+        pub removed_cells: Vec<(H256, u64, u32, u32, LockLiveCell)>,
     }
 }
 
