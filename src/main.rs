@@ -10,14 +10,8 @@ use jsonrpc_server_utils::hosts::DomainsValidation;
 
 use ckb_hash::new_blake2b;
 use ckb_jsonrpc_types as json_types;
-use ckb_types::{
-    bytes::{BufMut, Bytes, BytesMut},
-    core, packed,
-    prelude::*,
-    H160, H256,
-};
+use ckb_types::{bytes::Bytes, core, packed, prelude::*, H160, H256};
 use clap::{App, Arg, SubCommand};
-use log::info;
 use rocksdb::DB;
 use serde::{Deserialize, Serialize};
 use server::{Rpc, RpcImpl};
