@@ -1736,6 +1736,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sparse-merkle-tree",
+ "tempfile",
 ]
 
 [[package]]

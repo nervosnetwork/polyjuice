@@ -23,9 +23,11 @@ use serde::{Deserialize, Serialize};
 use server::{Rpc, RpcImpl};
 use std::convert::TryFrom;
 use std::fs;
+use std::process::Command;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use storage::{Indexer, Loader};
+use tempfile::NamedTempFile;
 use types::{
     CallKind, ContractAddress, EoaAddress, Program, RunConfig, TransactionReceipt, WitnessData,
     SECP256K1,
@@ -217,7 +219,9 @@ fn main() -> Result<(), String> {
                     .and_then(|json_string| {
                         serde_json::from_str(json_string.as_str()).map_err(|err| err.to_string())
                     })?;
-            let privkey = fs::read_to_string(m.value_of("privkey").unwrap())
+            // TODO: check the private key match the sender
+            let privkey_path = m.value_of("privkey").unwrap();
+            let privkey = fs::read_to_string(privkey_path)
                 .map_err(|err| err.to_string())
                 .and_then(|privkey| {
                     hex::decode(&privkey.trim().as_bytes()[0..64]).map_err(|err| err.to_string())
@@ -238,6 +242,7 @@ fn main() -> Result<(), String> {
                     .map(|witness_data| witness_data.raw_data())?;
             let mut witness_data = WitnessData::try_from(raw_witness.as_ref())?;
 
+            println!("Building signature");
             let tx = packed::Transaction::from(tx_receipt.tx.clone());
             let tx_hash: H256 = tx.calc_tx_hash().unpack();
             let message = witness_data.secp_message(&tx_hash)?;
@@ -247,6 +252,7 @@ fn main() -> Result<(), String> {
             signature_bytes[0..64].copy_from_slice(&data[0..64]);
             signature_bytes[64] = recov_id.to_i32() as u8;
 
+            println!("Rebuilding witness");
             witness_data.signature = Bytes::from(signature_bytes.to_vec());
             let raw_witness = witness_data.serialize();
             let data = packed::BytesOpt::new_builder()
@@ -258,11 +264,51 @@ fn main() -> Result<(), String> {
                 .output_type(data)
                 .build();
             tx_receipt.tx.witnesses[0] = json_types::JsonBytes::from_bytes(witness.as_bytes());
-            let json_string = serde_json::to_string_pretty(&tx_receipt).unwrap();
+            let tx_body: serde_json::Value = serde_json::to_value(&tx_receipt.tx).unwrap();
+
+            let tx_file = NamedTempFile::new().map_err(|err| err.to_string())?;
+            let tx_path_str = tx_file.path().to_str().unwrap();
+
+            println!("[Command]: ckb-cli tx init --tx-file {}", tx_path_str);
+            let output = Command::new("ckb-cli")
+                .args(&["tx", "init", "--tx-file", tx_path_str])
+                .output()
+                .expect("Failed to execute command");
+            println!("output: {:?}", output);
+
+            // Replace transaction in --tx-file
+            let cli_tx_content = fs::read_to_string(tx_path_str).unwrap();
+            let mut cli_tx: serde_json::Value = serde_json::from_str(&cli_tx_content).unwrap();
+            cli_tx["transaction"] = tx_body;
+            fs::write(
+                tx_path_str,
+                serde_json::to_string_pretty(&cli_tx).unwrap().as_bytes(),
+            )
+            .unwrap();
+
+            println!(
+                "[Command]: tx sign-inputs --privkey-path {} --tx-file {} --add-signatures",
+                privkey_path, tx_path_str
+            );
+            let output = Command::new("ckb-cli")
+                .args(&[
+                    "tx",
+                    "sign-inputs",
+                    "--privkey-path",
+                    privkey_path,
+                    "--tx-file",
+                    tx_path_str,
+                    "--add-signatures",
+                ])
+                .output()
+                .expect("Failed to execute command");
+            println!("output: {:?}", output);
+
+            let cli_tx_content = fs::read_to_string(tx_path_str).unwrap();
             if let Some(output) = m.value_of("output") {
-                fs::write(output, json_string.as_bytes()).map_err(|err| err.to_string())?;
+                fs::write(output, cli_tx_content.as_bytes()).map_err(|err| err.to_string())?;
             } else {
-                println!("{}", json_string);
+                println!("{}", cli_tx_content);
             }
         }
         ("build-tx", Some(m)) => {
