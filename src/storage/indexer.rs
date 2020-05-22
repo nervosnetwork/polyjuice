@@ -324,8 +324,8 @@ impl Indexer {
                             &self.run_config,
                             &tx_hash,
                             address,
-                            output_data,
                             &witness.into_bytes(),
+                            output_data,
                             &contract_inputs,
                         ) {
                             Ok((sender, new_storage, logs, code)) => {
@@ -486,7 +486,14 @@ fn generate_change(
                 .to_opt()
                 .ok_or_else(|| String::from("can not find output_type in witness"))
         })
-        .and_then(|witness_data| WitnessData::try_from(witness_data.as_slice()))?;
+        .map(|witness_data| witness_data.raw_data())
+        .and_then(|witness_data| {
+            log::debug!(
+                "WitnessArgs::output_type => {}",
+                hex::encode(witness_data.as_ref())
+            );
+            WitnessData::try_from(witness_data.as_ref())
+        })?;
     let program_data = witness_data.program_data();
 
     let (mut tree, code) = if let Some((old_storage, input_data)) = contract_inputs.get(address) {

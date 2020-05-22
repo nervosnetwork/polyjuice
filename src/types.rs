@@ -258,11 +258,13 @@ impl TryFrom<&[u8]> for WitnessData {
         let mut offset = 0;
         let (signature, program, return_data) = {
             let program_data = load_var_slice(data, &mut offset)?;
+            log::debug!("program_data: {}", hex::encode(&program_data));
             let mut inner_offset = 0;
             let mut signature = [0u8; 65];
             let tmp = load_slice_with_length(program_data, 65, &mut inner_offset)?;
             signature.copy_from_slice(tmp.as_ref());
             let program_slice = load_var_slice(program_data, &mut inner_offset)?;
+            log::debug!("program: {}", hex::encode(&program_slice));
             let program = Program::try_from(program_slice)?;
             let return_data = load_var_slice(program_data, &mut inner_offset)?;
             (
@@ -359,9 +361,28 @@ impl TryFrom<u8> for CallKind {
 }
 
 impl WitnessData {
+    pub fn new(program: Program) -> WitnessData {
+        WitnessData {
+            signature: Bytes::from(vec![0u8; 65]),
+            program,
+            return_data: Bytes::default(),
+            run_proof: Bytes::default(),
+        }
+    }
+
+    pub fn serialize(&self) -> Bytes {
+        let mut buf = BytesMut::default();
+        let program_data = self.program_data();
+        buf.put(&(program_data.len() as u32).to_le_bytes()[..]);
+        buf.put(program_data.as_ref());
+        buf.put(self.run_proof.as_ref());
+        buf.freeze()
+    }
+
     pub fn program_data(&self) -> Bytes {
         let mut buf = BytesMut::from(&self.signature[..]);
         let program = self.program.serialize();
+        log::info!("program: {}", hex::encode(program.as_ref()));
         buf.put(&(program.len() as u32).to_le_bytes()[..]);
         buf.put(program.as_ref());
         buf.put(&(self.return_data.len() as u32).to_le_bytes()[..]);
@@ -380,11 +401,14 @@ impl WitnessData {
         data.freeze()
     }
 
-    pub fn recover_pubkey(&self, tx_hash: &H256) -> Result<secp256k1::PublicKey, String> {
+    pub fn secp_message(&self, tx_hash: &H256) -> Result<secp256k1::Message, String> {
         let unsigned_data = self.unsigned_data(tx_hash);
-        let message = secp256k1::Message::from_slice(&blake2b_256(&unsigned_data)[..])
-            .map_err(|err| err.to_string())?;
+        secp256k1::Message::from_slice(&blake2b_256(&unsigned_data)[..])
+            .map_err(|err| err.to_string())
+    }
 
+    pub fn recover_pubkey(&self, tx_hash: &H256) -> Result<secp256k1::PublicKey, String> {
+        let message = self.secp_message(tx_hash)?;
         let mut signature_data = [0u8; 64];
         signature_data.copy_from_slice(&self.signature[0..64]);
         let recov_id =
@@ -483,8 +507,15 @@ pub fn load_u32(data: &[u8], offset: &mut usize) -> Result<u32, String> {
     }
     let mut buf = [0u8; 4];
     buf.copy_from_slice(&data[offset_value..offset_value + 4]);
+    let value = u32::from_le_bytes(buf);
+    log::debug!(
+        "[load] u32  : offset={:>3}, value ={:>3}, slice={}",
+        offset,
+        value,
+        hex::encode(&buf[..])
+    );
     *offset += 4;
-    Ok(u32::from_le_bytes(buf))
+    Ok(value)
 }
 
 pub fn load_h160(data: &[u8], offset: &mut usize) -> Result<H160, String> {
@@ -497,6 +528,7 @@ pub fn load_h160(data: &[u8], offset: &mut usize) -> Result<H160, String> {
         ));
     }
     let inner = H160::from_slice(&data[offset_value..offset_value + 20]).unwrap();
+    log::debug!("[load] H160 : offset={:>3}, value={:x}", offset, inner);
     *offset += 20;
     Ok(inner)
 }
@@ -517,6 +549,12 @@ pub fn load_slice_with_length<'a>(
         ));
     }
     let target = &data[offset_value..offset_value + length];
+    log::debug!(
+        "[load] slice: offset={:>3}, length={:>3}, slice={}",
+        offset,
+        length,
+        hex::encode(target)
+    );
     *offset += length;
     Ok(target)
 }
@@ -541,6 +579,9 @@ mod test {
 
     #[test]
     fn test_serde_witness_data() {
+        let data = hex::decode("7b0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000c8328aabcd9b9e8e64fbc566c4385c3bdeb219d700000000000000000000000000000000000000000101000060806040525b607b60006000508190909055505b610018565b60db806100266000396000f3fe60806040526004361060295760003560e01c806360fe47b114602f5780636d4ce63c14605b576029565b60006000fd5b60596004803603602081101560445760006000fd5b81019080803590602001909291905050506084565b005b34801560675760006000fd5b50606e6094565b6040518082815260200191505060405180910390f35b8060006000508190909055505b50565b6000600060005054905060a2565b9056fea26469706673582212204e58804e375d4a732a7b67cce8d8ffa904fa534d4555e655a433ce0a5e0d339f64736f6c63430006060033000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000010000004c").unwrap();
+        WitnessData::try_from(data.as_slice()).unwrap();
+
         let run_proof = RunProofResult::default();
         let run_proof_data = run_proof.serialize_pure().unwrap();
         let witness_data1 = WitnessData {

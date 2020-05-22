@@ -13,8 +13,8 @@ use std::error::Error as StdError;
 
 use super::Loader;
 use crate::types::{
-    CallKind, ContractAddress, Program, RunConfig, TransactionReceipt, ALWAYS_SUCCESS_SCRIPT,
-    MIN_CELL_CAPACITY, ONE_CKB, SIGHASH_CELL_DEP, SIGHASH_TYPE_HASH,
+    CallKind, ContractAddress, Program, RunConfig, TransactionReceipt, WitnessData,
+    ALWAYS_SUCCESS_SCRIPT, MIN_CELL_CAPACITY, ONE_CKB, SIGHASH_CELL_DEP, SIGHASH_TYPE_HASH,
 };
 
 pub struct Runner {
@@ -30,12 +30,6 @@ impl Runner {
             run_config,
             program,
         }
-    }
-
-    fn program_data(&self) -> Bytes {
-        let mut program_data = BytesMut::from(&[0u8; 65][..]);
-        program_data.put(self.program.serialize().as_ref());
-        program_data.freeze()
     }
 
     pub fn static_call(&self) -> Result<Bytes, String> {
@@ -75,7 +69,9 @@ impl Runner {
             .collect_cells(self.program.sender.clone(), tx_fee + output_capacity)?;
         let latest_tree: SparseMerkleTree<CkbBlake2bHasher, SmtH256, DefaultStore<SmtH256>> =
             Default::default();
-        let program_data = self.program_data();
+        let mut witness_data = WitnessData::new(self.program.clone());
+        let program_data = witness_data.program_data();
+        log::debug!("program_data: {}", hex::encode(program_data.as_ref()));
 
         let config: Config = (&self.run_config).into();
         let result = run(&config, &latest_tree, &program_data)?;
@@ -107,9 +103,11 @@ impl Runner {
             .args(type_id_args.pack())
             .build();
 
-        let data = BytesOpt::new_builder()
-            .set(Some(proof.serialize(&program_data)?.pack()))
-            .build();
+        witness_data.return_data = result.return_data.clone();
+        let program_data = witness_data.program_data();
+        let s = proof.serialize(&program_data)?;
+        log::info!("WitnessData: {}", hex::encode(s.as_ref()));
+        let data = BytesOpt::new_builder().set(Some(s.pack())).build();
         let witness = WitnessArgs::new_builder().output_type(data).build();
         let output = CellOutput::new_builder()
             .type_(
