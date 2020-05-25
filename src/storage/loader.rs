@@ -1,4 +1,5 @@
 use bincode::deserialize;
+use ckb_jsonrpc_types as json_types;
 use ckb_types::{
     bytes::Bytes,
     core::{EpochNumberWithFraction, ScriptHashType},
@@ -52,6 +53,22 @@ impl Loader {
             db,
             client: HttpRpcClient::new(ckb_uri.to_string()),
         })
+    }
+
+    pub fn load_contract_live_cell(
+        &mut self,
+        tx_hash: H256,
+        output_index: u32,
+    ) -> Result<(packed::CellOutput, Bytes), String> {
+        let out_point = json_types::OutPoint {
+            tx_hash,
+            index: json_types::Uint32::from(output_index),
+        };
+        let cell_with_status = self.client.get_live_cell(out_point, true)?;
+        let cell = cell_with_status
+            .cell
+            .ok_or_else(|| String::from("contract cell is not live cell"))?;
+        Ok((cell.output.into(), cell.data.unwrap().content.into_bytes()))
     }
 
     pub fn collect_cells(
@@ -118,7 +135,15 @@ impl Loader {
             }
             iter.next();
         }
-        Ok((live_cells, total_capacity))
+
+        if total_capacity < min_capacity {
+            Err(format!(
+                "Not enough live cells: total capacity = {}",
+                total_capacity
+            ))
+        } else {
+            Ok((live_cells, total_capacity))
+        }
     }
 
     pub fn load_latest_contract_change(
@@ -127,20 +152,11 @@ impl Loader {
         block_number: Option<u64>,
         load_logs: bool,
     ) -> Result<ContractChange, String> {
-        let prefix_key = if let Some(number) = block_number {
-            Key::ContractChange {
-                address: address.clone(),
-                number: Some(number),
-                tx_index: None,
-                output_index: None,
-            }
-        } else {
-            Key::ContractChange {
-                address: address.clone(),
-                number: None,
-                tx_index: None,
-                output_index: None,
-            }
+        let prefix_key = Key::ContractChange {
+            address: address.clone(),
+            number: None,
+            tx_index: None,
+            output_index: None,
         };
         let prefix_key_bytes = Bytes::from(&prefix_key);
 

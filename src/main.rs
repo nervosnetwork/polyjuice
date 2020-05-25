@@ -281,7 +281,7 @@ fn main() -> Result<(), String> {
             .unwrap();
 
             println!(
-                "[Command]: tx sign-inputs --privkey-path {} --tx-file {} --add-signatures",
+                "[Command]: tx sign-inputs --privkey-path {} --tx-file {} --add-signatures --skip-check",
                 privkey_path, tx_path_str
             );
             let output = Command::new("ckb-cli")
@@ -293,6 +293,7 @@ fn main() -> Result<(), String> {
                     "--tx-file",
                     tx_path_str,
                     "--add-signatures",
+                    "--skip-check",
                 ])
                 .output()
                 .expect("Failed to execute command");

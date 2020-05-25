@@ -329,6 +329,19 @@ impl Indexer {
                             &contract_inputs,
                         ) {
                             Ok((sender, new_storage, logs, code)) => {
+                                if is_create {
+                                    log::info!(
+                                        "[CREATE]: sender={:x}, contract={:x}",
+                                        sender.0,
+                                        address.0
+                                    );
+                                } else {
+                                    log::info!(
+                                        "[CALL]: sender={:x}, contract={:x}",
+                                        sender.0,
+                                        address.0
+                                    );
+                                }
                                 tx_changes.push(ContractChange {
                                     sender,
                                     new_storage,

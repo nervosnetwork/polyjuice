@@ -18,6 +18,7 @@ use crate::storage::{value, Key};
 
 pub const ONE_CKB: u64 = 100_000_000;
 pub const MIN_CELL_CAPACITY: u64 = 61 * ONE_CKB;
+
 pub const SIGHASH_TYPE_HASH: H256 =
     h256!("0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8");
 pub const ALWAYS_SUCCESS_CODE_HASH: H256 =
@@ -197,6 +198,7 @@ pub struct LogEntry {
     pub data: Bytes,
 }
 
+// TODO: Move this struct to server.rs
 /// The transaction receipt
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -204,6 +206,7 @@ pub struct TransactionReceipt {
     pub tx: json_types::Transaction,
     /// The newly created contract's address (Program.depth=0)
     pub contract_address: Option<ContractAddress>,
+    pub return_data: Option<json_types::JsonBytes>,
     pub logs: Vec<LogEntry>,
 }
 
@@ -296,6 +299,25 @@ impl Program {
         }
     }
 
+    pub fn new_call(
+        sender: EoaAddress,
+        destination: ContractAddress,
+        code: Bytes,
+        input: Bytes,
+        is_static: bool,
+    ) -> Program {
+        let flags = if is_static { 1 } else { 0 };
+        Program {
+            kind: CallKind::CALL,
+            flags,
+            depth: 0,
+            sender,
+            destination,
+            code,
+            input,
+        }
+    }
+
     pub fn serialize(&self) -> Bytes {
         let mut buf = BytesMut::default();
         buf.put(&[self.kind as u8][..]);
@@ -382,7 +404,7 @@ impl WitnessData {
     pub fn program_data(&self) -> Bytes {
         let mut buf = BytesMut::from(&self.signature[..]);
         let program = self.program.serialize();
-        log::info!("program: {}", hex::encode(program.as_ref()));
+        log::debug!("program: {}", hex::encode(program.as_ref()));
         buf.put(&(program.len() as u32).to_le_bytes()[..]);
         buf.put(program.as_ref());
         buf.put(&(self.return_data.len() as u32).to_le_bytes()[..]);
@@ -508,7 +530,7 @@ pub fn load_u32(data: &[u8], offset: &mut usize) -> Result<u32, String> {
     let mut buf = [0u8; 4];
     buf.copy_from_slice(&data[offset_value..offset_value + 4]);
     let value = u32::from_le_bytes(buf);
-    log::debug!(
+    log::trace!(
         "[load] u32  : offset={:>3}, value ={:>3}, slice={}",
         offset,
         value,
@@ -528,7 +550,7 @@ pub fn load_h160(data: &[u8], offset: &mut usize) -> Result<H160, String> {
         ));
     }
     let inner = H160::from_slice(&data[offset_value..offset_value + 20]).unwrap();
-    log::debug!("[load] H160 : offset={:>3}, value={:x}", offset, inner);
+    log::trace!("[load] H160 : offset={:>3}, value={:x}", offset, inner);
     *offset += 20;
     Ok(inner)
 }
@@ -549,7 +571,7 @@ pub fn load_slice_with_length<'a>(
         ));
     }
     let target = &data[offset_value..offset_value + length];
-    log::debug!(
+    log::trace!(
         "[load] slice: offset={:>3}, length={:>3}, slice={}",
         offset,
         length,
