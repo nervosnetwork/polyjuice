@@ -30,4 +30,4 @@ ckb-hash = { git = "https://github.com/nervosnetwork/ckb", tag = "v0.31.0-pre1" 
 ckb-types = { git = "https://github.com/nervosnetwork/ckb", tag = "v0.31.0-pre1" }
 ckb-jsonrpc-types = { git = "https://github.com/nervosnetwork/ckb", tag = "v0.31.0-pre1" }
 # ckb-simple-account-layer = { git = "https://github.com/nervosnetwork/ckb-simple-account-layer", rev = "83f20d9" }
-ckb-simple-account-layer = { path = "/home/weet/Projects/thewawar/ckb-simple-account-layer/crates/layer" }
+ckb-simple-account-layer = { git = "https://github.com/TheWaWaR/ckb-simple-account-layer.git", rev = "cf2a404" }
