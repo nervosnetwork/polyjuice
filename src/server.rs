@@ -13,9 +13,6 @@ use std::sync::Arc;
 
 #[rpc(server)]
 pub trait Rpc {
-    // #[rpc(name = "static_call")]
-    // fn static_call(&self) -> Result<JsonBytes>;
-
     #[rpc(name = "get_code")]
     fn get_code(&self, contract_address: ContractAddress) -> Result<ContractCodeJson>;
 
@@ -25,6 +22,14 @@ pub trait Rpc {
         contract_address: ContractAddress,
         block_number: Option<u64>,
     ) -> Result<ContractChangeJson>;
+
+    #[rpc(name = "static_call")]
+    fn static_call(
+        &self,
+        sender: EoaAddress,
+        contract_address: ContractAddress,
+        input: JsonBytes,
+    ) -> Result<JsonBytes>;
 
     #[rpc(name = "call")]
     fn call(
@@ -61,6 +66,20 @@ impl Rpc for RpcImpl {
             .load_latest_contract_change(contract_address, block_number, true)
             .map(ContractChangeJson::from)
             .map_err(convert_err)
+    }
+
+    fn static_call(
+        &self,
+        sender: EoaAddress,
+        contract_address: ContractAddress,
+        input: JsonBytes,
+    ) -> Result<JsonBytes> {
+        let loader = Loader::clone(&self.loader);
+        let run_config = self.run_config.clone();
+        Runner::new(loader, run_config)
+            .static_call(sender, contract_address, input.into_bytes())
+            .map(JsonBytes::from_bytes)
+            .map_err(convert_err_box)
     }
 
     fn call(

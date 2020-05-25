@@ -27,18 +27,40 @@ impl Runner {
         Runner { loader, run_config }
     }
 
-    // pub fn static_call(&self) -> Result<Bytes, String> {
-    //     let latest_tree = self
-    //         .loader
-    //         .load_latest_contract_change(program.destination.clone(), None, false)?
-    //         .merkle_tree();
-    //     let mut program_data = BytesMut::from(&[0u8; 65][..]);
-    //     program_data.put(program.serialize().as_ref());
-    //     let config: Config = (&self.run_config).into();
-    //     let result =
-    //         run(&config, &latest_tree, &program_data.freeze()).map_err(|err| err.to_string())?;
-    //     Ok(result.return_data)
-    // }
+    pub fn static_call(
+        &mut self,
+        sender: EoaAddress,
+        destination: ContractAddress,
+        input: Bytes,
+    ) -> Result<Bytes, Box<dyn StdError>> {
+        log::debug!("loading code ...");
+        let code = self.loader.load_contract_code(destination.clone())?.code;
+        let code_hash = blake2b_256(code.as_ref());
+        log::debug!("loading change ...");
+        let latest_change =
+            self.loader
+                .load_latest_contract_change(destination.clone(), None, false)?;
+        let program = Program::new_call(sender, destination, code, input, true);
+
+        let latest_tree = latest_change.merkle_tree();
+        let mut witness_data = WitnessData::new(program.clone());
+        let program_data = witness_data.program_data();
+
+        let config: Config = (&self.run_config).into();
+        log::debug!(
+            "[length]: {}",
+            hex::encode(&(program_data.len() as u32).to_le_bytes()[..])
+        );
+        log::debug!("[binary]: {}", hex::encode(program_data.as_ref()));
+        let result = match run(&config, &latest_tree, &program_data) {
+            Ok(result) => result,
+            Err(err) => {
+                log::warn!("Error: {:?}", err);
+                return Err(err);
+            }
+        };
+        Ok(result.return_data)
+    }
 
     pub fn call(
         &mut self,
@@ -72,6 +94,11 @@ impl Runner {
         let mut witness_data = WitnessData::new(program.clone());
         let program_data = witness_data.program_data();
 
+        log::debug!(
+            "[length]: {}",
+            hex::encode(&(program_data.len() as u32).to_le_bytes()[..])
+        );
+        log::debug!("[binary]: {}", hex::encode(program_data.as_ref()));
         let config: Config = (&self.run_config).into();
         let result = run(&config, &latest_tree, &program_data)?;
         let proof = result.generate_proof(&latest_tree)?;

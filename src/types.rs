@@ -261,13 +261,13 @@ impl TryFrom<&[u8]> for WitnessData {
         let mut offset = 0;
         let (signature, program, return_data) = {
             let program_data = load_var_slice(data, &mut offset)?;
-            log::debug!("program_data: {}", hex::encode(&program_data));
+            log::trace!("program_data: {}", hex::encode(&program_data));
             let mut inner_offset = 0;
             let mut signature = [0u8; 65];
             let tmp = load_slice_with_length(program_data, 65, &mut inner_offset)?;
             signature.copy_from_slice(tmp.as_ref());
             let program_slice = load_var_slice(program_data, &mut inner_offset)?;
-            log::debug!("program: {}", hex::encode(&program_slice));
+            log::trace!("program: {}", hex::encode(&program_slice));
             let program = Program::try_from(program_slice)?;
             let return_data = load_var_slice(program_data, &mut inner_offset)?;
             (
@@ -404,7 +404,7 @@ impl WitnessData {
     pub fn program_data(&self) -> Bytes {
         let mut buf = BytesMut::from(&self.signature[..]);
         let program = self.program.serialize();
-        log::debug!("program: {}", hex::encode(program.as_ref()));
+        log::trace!("program: {}", hex::encode(program.as_ref()));
         buf.put(&(program.len() as u32).to_le_bytes()[..]);
         buf.put(program.as_ref());
         buf.put(&(self.return_data.len() as u32).to_le_bytes()[..]);
