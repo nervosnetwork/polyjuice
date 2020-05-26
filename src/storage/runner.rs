@@ -1,10 +1,11 @@
 use ckb_hash::{blake2b_256, new_blake2b};
-use ckb_jsonrpc_types as json_types;
-use ckb_simple_account_layer::{run, CkbBlake2bHasher, Config};
+use ckb_simple_account_layer::{run, CkbBlake2bHasher, Config, RunResult};
 use ckb_types::{
     bytes::{BufMut, Bytes, BytesMut},
     core::{ScriptHashType, TransactionBuilder},
-    packed::{BytesOpt, CellInput, CellOutput, OutPoint, Script, ScriptOpt, WitnessArgs},
+    packed::{
+        BytesOpt, CellInput, CellOutput, OutPoint, Script, ScriptOpt, Transaction, WitnessArgs,
+    },
     prelude::*,
     H160,
 };
@@ -13,8 +14,8 @@ use std::error::Error as StdError;
 
 use super::Loader;
 use crate::types::{
-    parse_log, ContractAddress, EoaAddress, Program, RunConfig, TransactionReceipt, WitnessData,
-    ALWAYS_SUCCESS_SCRIPT, MIN_CELL_CAPACITY, ONE_CKB, SIGHASH_CELL_DEP, SIGHASH_TYPE_HASH,
+    ContractAddress, EoaAddress, Program, RunConfig, WitnessData, ALWAYS_SUCCESS_SCRIPT,
+    MIN_CELL_CAPACITY, ONE_CKB, SIGHASH_CELL_DEP, SIGHASH_TYPE_HASH,
 };
 
 pub struct Runner {
@@ -71,7 +72,7 @@ impl Runner {
         sender: EoaAddress,
         destination: ContractAddress,
         input: Bytes,
-    ) -> Result<TransactionReceipt, Box<dyn StdError>> {
+    ) -> Result<(Transaction, RunResult), Box<dyn StdError>> {
         let meta = self.loader.load_contract_meta(destination.clone())?;
         if meta.destructed {
             return Err(format!("Contract already destructed: {:x}", destination.0).into());
@@ -185,28 +186,14 @@ impl Runner {
         }
 
         let tx = transaction_builder.build();
-        let rpc_tx = json_types::Transaction::from(tx.data());
-        let logs = result
-            .logs
-            .into_iter()
-            .map(|log_data| {
-                parse_log(log_data.as_ref())
-                    .map(|(topics, data)| (topics, json_types::JsonBytes::from_bytes(data)))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        Ok(TransactionReceipt {
-            tx: rpc_tx,
-            contract_address: None,
-            return_data: Some(json_types::JsonBytes::from_bytes(result.return_data)),
-            logs,
-        })
+        Ok((tx.data(), result))
     }
 
     pub fn create(
         &mut self,
         sender: EoaAddress,
         code: Bytes,
-    ) -> Result<TransactionReceipt, Box<dyn StdError>> {
+    ) -> Result<(ContractAddress, Transaction, RunResult), Box<dyn StdError>> {
         let program = Program::new_create(sender, code);
 
         // TODO: let user choose the lock
@@ -221,10 +208,20 @@ impl Runner {
             Default::default();
         let mut witness_data = WitnessData::new(program.clone());
         let program_data = witness_data.program_data();
-        log::debug!("program_data: {}", hex::encode(program_data.as_ref()));
 
+        log::debug!(
+            "[length]: {}",
+            hex::encode(&(program_data.len() as u32).to_le_bytes()[..])
+        );
+        log::debug!("[binary]: {}", hex::encode(program_data.as_ref()));
         let config: Config = (&self.run_config).into();
-        let result = run(&config, &latest_tree, &program_data)?;
+        let result = match run(&config, &latest_tree, &program_data) {
+            Ok(result) => result,
+            Err(err) => {
+                log::warn!("Error: {:?}", err);
+                return Err(err);
+            }
+        };
         let proof = result.generate_proof(&latest_tree)?;
         let root_hash = result.committed_root_hash(&latest_tree)?;
 
@@ -297,20 +294,6 @@ impl Runner {
                 .output_data(Bytes::default().pack());
         }
         let tx = transaction_builder.build();
-        let rpc_tx = json_types::Transaction::from(tx.data());
-        let logs = result
-            .logs
-            .into_iter()
-            .map(|log_data| {
-                parse_log(log_data.as_ref())
-                    .map(|(topics, data)| (topics, json_types::JsonBytes::from_bytes(data)))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        Ok(TransactionReceipt {
-            tx: rpc_tx,
-            contract_address: Some(contract_address),
-            return_data: None,
-            logs,
-        })
+        Ok((contract_address, tx.data(), result))
     }
 }

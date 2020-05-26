@@ -5,16 +5,18 @@ use ckb_types::{
     core::{EpochNumberWithFraction, ScriptHashType},
     packed,
     prelude::*,
-    H160, H256, U256,
+    H256, U256,
 };
 use rocksdb::DB;
+use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::sync::Arc;
 
 use super::{db_get, value, Key};
 use crate::client::HttpRpcClient;
 use crate::types::{
-    ContractAddress, ContractChange, ContractMeta, EoaAddress, CELLBASE_MATURITY, SIGHASH_TYPE_HASH,
+    ContractAddress, ContractChange, ContractMeta, EoaAddress, LogInfo, CELLBASE_MATURITY,
+    SIGHASH_TYPE_HASH,
 };
 
 // Query Interface
@@ -255,15 +257,77 @@ impl Loader {
     }
 
     pub fn load_logs(
-        &self,
+        &mut self,
         from_block: u64,
-        to_block: u64,
-        _block_hash: Option<H256>,
-        address: Option<H160>,
+        to_block: Option<u64>,
+        address: Option<ContractAddress>,
         filter_topics: Option<Vec<H256>>,
-        _limit: Option<usize>,
-    ) -> Result<Vec<(Vec<H256>, Bytes)>, String> {
-        Err(String::from("TODO: Loader::load_logs"))
+        limit: Option<u32>,
+    ) -> Result<Vec<LogInfo>, String> {
+        let to_block = to_block
+            .map(Ok)
+            .unwrap_or_else(|| self.client.get_tip_block_number())?;
+        let filter_topics = filter_topics.map(|topics| topics.into_iter().collect::<HashSet<_>>());
+
+        let mut all_logs = Vec::new();
+        for number in from_block..=to_block {
+            let key_bytes = Bytes::from(&Key::BlockDelta(number));
+            let block_delta = match db_get::<_, value::BlockDelta>(&self.db, &key_bytes)? {
+                Some(block_delta) => block_delta,
+                None => {
+                    return Ok(all_logs);
+                }
+            };
+            for (addr, _is_create) in block_delta.contracts {
+                let key_prefix_bytes = Bytes::from(&Key::ContractLogs {
+                    address: addr.clone(),
+                    number: Some(number),
+                    tx_index: None,
+                    output_index: None,
+                });
+                let mut iter = self.db.raw_iterator();
+                iter.seek(&key_prefix_bytes);
+                while iter.valid() {
+                    if let Some((key_bytes, value_bytes)) = iter
+                        .key()
+                        .filter(|key| key.starts_with(&key_prefix_bytes))
+                        .and_then(|key| iter.value().map(|value| (key, value)))
+                    {
+                        let value: value::ContractLogs =
+                            deserialize(value_bytes).map_err(|err| err.to_string())?;
+                        let tx_index = match Key::try_from(key_bytes)? {
+                            Key::ContractLogs { tx_index, .. } => tx_index.unwrap(),
+                            _ => {
+                                panic!("DB corrupted deserialize Key::ContractChange");
+                            }
+                        };
+                        for (topics, data) in value.0.into_iter().filter(|(topics, _)| {
+                            filter_topics
+                                .as_ref()
+                                .map(|filter_topics| {
+                                    topics.iter().any(|topic| filter_topics.contains(topic))
+                                })
+                                .unwrap_or(true)
+                        }) {
+                            if all_logs.len() >= limit.unwrap_or(std::u32::MAX) as usize {
+                                return Ok(all_logs);
+                            }
+                            all_logs.push(LogInfo {
+                                block_number: number,
+                                tx_index,
+                                address: addr.clone(),
+                                topics,
+                                data,
+                            });
+                        }
+                    } else {
+                        break;
+                    }
+                    iter.next();
+                }
+            }
+        }
+        Ok(all_logs)
     }
 }
 

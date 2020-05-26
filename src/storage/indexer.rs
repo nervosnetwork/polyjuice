@@ -512,6 +512,8 @@ impl Indexer {
 
             // selfdestruct
             for contract_address in &destructed_contracts {
+                // For clean up logs when rollback
+                block_contracts.insert(contract_address.clone(), false);
                 let key_bytes = Bytes::from(&Key::ContractMeta(contract_address.clone()));
                 let mut meta: value::ContractMeta = db_get(&self.db, &key_bytes)?
                     .ok_or_else(|| format!("no such contract: {:x}", contract_address.0))?;

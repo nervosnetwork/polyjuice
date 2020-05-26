@@ -14,7 +14,7 @@ use ckb_types::{bytes::Bytes, core, packed, prelude::*, H160, H256};
 use clap::{App, Arg, SubCommand};
 use rocksdb::DB;
 use serde::{Deserialize, Serialize};
-use server::{Rpc, RpcImpl};
+use server::{Rpc, RpcImpl, TransactionReceipt};
 use std::convert::TryFrom;
 use std::fs;
 use std::process::Command;
@@ -22,10 +22,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use storage::{Indexer, Loader};
 use tempfile::NamedTempFile;
-use types::{
-    CallKind, ContractAddress, EoaAddress, Program, RunConfig, TransactionReceipt, WitnessData,
-    SECP256K1,
-};
+use types::{CallKind, ContractAddress, EoaAddress, Program, RunConfig, WitnessData, SECP256K1};
 
 fn main() -> Result<(), String> {
     env_logger::init();

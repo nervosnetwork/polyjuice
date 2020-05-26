@@ -1,5 +1,4 @@
 use ckb_hash::blake2b_256;
-use ckb_jsonrpc_types as json_types;
 use ckb_simple_account_layer::{CkbBlake2bHasher, Config, RunResult};
 use ckb_types::{
     bytes::{BufMut, Bytes, BytesMut},
@@ -193,16 +192,13 @@ pub struct EoaAddress(pub H160);
 #[derive(Default, Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ContractAddress(pub H160);
 
-// TODO: Move this struct to server.rs
-/// The transaction receipt
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TransactionReceipt {
-    pub tx: json_types::Transaction,
-    /// The newly created contract's address (Program.depth=0)
-    pub contract_address: Option<ContractAddress>,
-    pub return_data: Option<json_types::JsonBytes>,
-    pub logs: Vec<(Vec<H256>, json_types::JsonBytes)>,
+#[derive(Default, Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LogInfo {
+    pub block_number: u64,
+    pub tx_index: u32,
+    pub address: ContractAddress,
+    pub topics: Vec<H256>,
+    pub data: Bytes,
 }
 
 impl From<&RunConfig> for Config {

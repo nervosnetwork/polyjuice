@@ -1,34 +1,19 @@
 use crate::storage::{Loader, Runner};
 use crate::types::{
-    ContractAddress, ContractChange, ContractMeta, EoaAddress, RunConfig, TransactionReceipt,
+    parse_log, ContractAddress, ContractChange, ContractMeta, EoaAddress, RunConfig,
 };
-use ckb_jsonrpc_types::JsonBytes;
-use ckb_types::H256;
-use jsonrpc_core::{Error, ErrorCode, Result};
+use ckb_jsonrpc_types::{JsonBytes, Transaction};
+use ckb_types::{bytes::Bytes, H256};
+use jsonrpc_core::{Error, ErrorCode, Result as RpcResult};
 use jsonrpc_derive::rpc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::error::Error as StdError;
 use std::sync::Arc;
 
 #[rpc(server)]
 pub trait Rpc {
-    #[rpc(name = "get_code")]
-    fn get_code(&self, contract_address: ContractAddress) -> Result<ContractCodeJson>;
-
-    #[rpc(name = "get_change")]
-    fn get_change(
-        &self,
-        contract_address: ContractAddress,
-        block_number: Option<u64>,
-    ) -> Result<ContractChangeJson>;
-
-    #[rpc(name = "static_call")]
-    fn static_call(
-        &self,
-        sender: EoaAddress,
-        contract_address: ContractAddress,
-        input: JsonBytes,
-    ) -> Result<JsonBytes>;
+    #[rpc(name = "create")]
+    fn create(&self, sender: EoaAddress, code: JsonBytes) -> RpcResult<TransactionReceipt>;
 
     #[rpc(name = "call")]
     fn call(
@@ -36,10 +21,35 @@ pub trait Rpc {
         sender: EoaAddress,
         contract_address: ContractAddress,
         input: JsonBytes,
-    ) -> Result<TransactionReceipt>;
+    ) -> RpcResult<TransactionReceipt>;
 
-    #[rpc(name = "create")]
-    fn create(&self, sender: EoaAddress, code: JsonBytes) -> Result<TransactionReceipt>;
+    #[rpc(name = "static_call")]
+    fn static_call(
+        &self,
+        sender: EoaAddress,
+        contract_address: ContractAddress,
+        input: JsonBytes,
+    ) -> RpcResult<JsonBytes>;
+
+    #[rpc(name = "get_code")]
+    fn get_code(&self, contract_address: ContractAddress) -> RpcResult<ContractCodeJson>;
+
+    #[rpc(name = "get_change")]
+    fn get_change(
+        &self,
+        contract_address: ContractAddress,
+        block_number: Option<u64>,
+    ) -> RpcResult<ContractChangeJson>;
+
+    #[rpc(name = "get_logs")]
+    fn get_logs(
+        &self,
+        from_block: u64,
+        to_block: Option<u64>,
+        address: Option<ContractAddress>,
+        filter_topics: Option<Vec<H256>>,
+        limit: Option<u32>,
+    ) -> RpcResult<Vec<LogInfo>>;
 }
 
 pub struct RpcImpl {
@@ -48,7 +58,74 @@ pub struct RpcImpl {
 }
 
 impl Rpc for RpcImpl {
-    fn get_code(&self, contract_address: ContractAddress) -> Result<ContractCodeJson> {
+    fn create(&self, sender: EoaAddress, code: JsonBytes) -> RpcResult<TransactionReceipt> {
+        let loader = Loader::clone(&self.loader);
+        let run_config = self.run_config.clone();
+        let (contract_address, tx, result) = Runner::new(loader, run_config)
+            .create(sender, code.into_bytes())
+            .map_err(convert_err_box)?;
+
+        let logs = result
+            .logs
+            .into_iter()
+            .map(|log_data| {
+                parse_log(log_data.as_ref())
+                    .map(|(topics, data)| LogEntry::new(contract_address.clone(), topics, data))
+            })
+            .collect::<Result<Vec<_>, String>>()
+            .map_err(convert_err)?;
+        Ok(TransactionReceipt {
+            tx: Transaction::from(tx),
+            contract_address: Some(contract_address),
+            return_data: Some(JsonBytes::from_bytes(result.return_data)),
+            logs,
+        })
+    }
+
+    fn call(
+        &self,
+        sender: EoaAddress,
+        contract_address: ContractAddress,
+        input: JsonBytes,
+    ) -> RpcResult<TransactionReceipt> {
+        let loader = Loader::clone(&self.loader);
+        let run_config = self.run_config.clone();
+        let (tx, result) = Runner::new(loader, run_config)
+            .call(sender, contract_address.clone(), input.into_bytes())
+            .map_err(convert_err_box)?;
+
+        let logs = result
+            .logs
+            .into_iter()
+            .map(|log_data| {
+                parse_log(log_data.as_ref())
+                    .map(|(topics, data)| LogEntry::new(contract_address.clone(), topics, data))
+            })
+            .collect::<Result<Vec<_>, String>>()
+            .map_err(convert_err)?;
+        Ok(TransactionReceipt {
+            tx: Transaction::from(tx),
+            contract_address: None,
+            return_data: Some(JsonBytes::from_bytes(result.return_data)),
+            logs,
+        })
+    }
+
+    fn static_call(
+        &self,
+        sender: EoaAddress,
+        contract_address: ContractAddress,
+        input: JsonBytes,
+    ) -> RpcResult<JsonBytes> {
+        let loader = Loader::clone(&self.loader);
+        let run_config = self.run_config.clone();
+        Runner::new(loader, run_config)
+            .static_call(sender, contract_address, input.into_bytes())
+            .map(JsonBytes::from_bytes)
+            .map_err(convert_err_box)
+    }
+
+    fn get_code(&self, contract_address: ContractAddress) -> RpcResult<ContractCodeJson> {
         self.loader
             .load_contract_meta(contract_address)
             .map(ContractCodeJson::from)
@@ -59,46 +136,37 @@ impl Rpc for RpcImpl {
         &self,
         contract_address: ContractAddress,
         block_number: Option<u64>,
-    ) -> Result<ContractChangeJson> {
+    ) -> RpcResult<ContractChangeJson> {
         self.loader
             .load_latest_contract_change(contract_address, block_number, true, true)
             .map(ContractChangeJson::from)
             .map_err(convert_err)
     }
 
-    fn static_call(
+    fn get_logs(
         &self,
-        sender: EoaAddress,
-        contract_address: ContractAddress,
-        input: JsonBytes,
-    ) -> Result<JsonBytes> {
-        let loader = Loader::clone(&self.loader);
-        let run_config = self.run_config.clone();
-        Runner::new(loader, run_config)
-            .static_call(sender, contract_address, input.into_bytes())
-            .map(JsonBytes::from_bytes)
-            .map_err(convert_err_box)
-    }
-
-    fn call(
-        &self,
-        sender: EoaAddress,
-        contract_address: ContractAddress,
-        input: JsonBytes,
-    ) -> Result<TransactionReceipt> {
-        let loader = Loader::clone(&self.loader);
-        let run_config = self.run_config.clone();
-        Runner::new(loader, run_config)
-            .call(sender, contract_address, input.into_bytes())
-            .map_err(convert_err_box)
-    }
-
-    fn create(&self, sender: EoaAddress, code: JsonBytes) -> Result<TransactionReceipt> {
-        let loader = Loader::clone(&self.loader);
-        let run_config = self.run_config.clone();
-        Runner::new(loader, run_config)
-            .create(sender, code.into_bytes())
-            .map_err(convert_err_box)
+        from_block: u64,
+        to_block: Option<u64>,
+        address: Option<ContractAddress>,
+        filter_topics: Option<Vec<H256>>,
+        limit: Option<u32>,
+    ) -> RpcResult<Vec<LogInfo>> {
+        let mut loader = Loader::clone(&self.loader);
+        loader
+            .load_logs(from_block, to_block, address, filter_topics, limit)
+            .map(|logs| {
+                logs.into_iter()
+                    .map(|info| {
+                        let log = LogEntry::new(info.address, info.topics, info.data);
+                        LogInfo {
+                            block_number: info.block_number,
+                            tx_index: info.tx_index,
+                            log,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .map_err(convert_err)
     }
 }
 
@@ -171,4 +239,44 @@ impl From<ContractMeta> for ContractCodeJson {
             output_index: meta.output_index,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogInfo {
+    block_number: u64,
+    tx_index: u32,
+    log: LogEntry,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogEntry {
+    address: ContractAddress,
+    topics: Vec<H256>,
+    data: JsonBytes,
+}
+
+impl LogEntry {
+    pub fn new(address: ContractAddress, topics: Vec<H256>, data: Bytes) -> LogEntry {
+        LogEntry {
+            address,
+            topics,
+            data: JsonBytes::from_bytes(data),
+        }
+    }
+}
+
+/// The transaction receipt
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransactionReceipt {
+    pub tx: Transaction,
+    /// The newly created contract's address (Program.depth=0)
+    pub contract_address: Option<ContractAddress>,
+    pub return_data: Option<JsonBytes>,
+    pub logs: Vec<LogEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StaticCallResponse {
+    return_data: JsonBytes,
+    logs: Vec<LogEntry>,
 }
