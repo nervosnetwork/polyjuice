@@ -1,7 +1,6 @@
 use crate::storage::{Loader, Runner};
 use crate::types::{
-    ContractAddress, ContractChange, ContractCode, EoaAddress, Program, RunConfig,
-    TransactionReceipt,
+    ContractAddress, ContractChange, ContractMeta, EoaAddress, RunConfig, TransactionReceipt,
 };
 use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::H256;
@@ -50,11 +49,10 @@ pub struct RpcImpl {
 
 impl Rpc for RpcImpl {
     fn get_code(&self, contract_address: ContractAddress) -> Result<ContractCodeJson> {
-        let code = self
-            .loader
-            .load_contract_code(contract_address)
-            .map_err(convert_err)?;
-        Ok(code.into())
+        self.loader
+            .load_contract_meta(contract_address)
+            .map(ContractCodeJson::from)
+            .map_err(convert_err)
     }
 
     fn get_change(
@@ -63,7 +61,7 @@ impl Rpc for RpcImpl {
         block_number: Option<u64>,
     ) -> Result<ContractChangeJson> {
         self.loader
-            .load_latest_contract_change(contract_address, block_number, true)
+            .load_latest_contract_change(contract_address, block_number, true, true)
             .map(ContractChangeJson::from)
             .map_err(convert_err)
     }
@@ -165,12 +163,12 @@ pub struct ContractCodeJson {
     /// The output index of the transaction where the contract created
     pub output_index: u32,
 }
-impl From<ContractCode> for ContractCodeJson {
-    fn from(cc: ContractCode) -> ContractCodeJson {
+impl From<ContractMeta> for ContractCodeJson {
+    fn from(meta: ContractMeta) -> ContractCodeJson {
         ContractCodeJson {
-            code: JsonBytes::from_bytes(cc.code),
-            tx_hash: cc.tx_hash,
-            output_index: cc.output_index,
+            code: JsonBytes::from_bytes(meta.code),
+            tx_hash: meta.tx_hash,
+            output_index: meta.output_index,
         }
     }
 }

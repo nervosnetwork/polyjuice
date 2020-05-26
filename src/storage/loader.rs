@@ -14,8 +14,7 @@ use std::sync::Arc;
 use super::{db_get, value, Key};
 use crate::client::HttpRpcClient;
 use crate::types::{
-    ContractAddress, ContractChange, ContractCode, EoaAddress, LogEntry, CELLBASE_MATURITY,
-    SIGHASH_TYPE_HASH,
+    ContractAddress, ContractChange, ContractMeta, EoaAddress, CELLBASE_MATURITY, SIGHASH_TYPE_HASH,
 };
 
 // Query Interface
@@ -151,7 +150,14 @@ impl Loader {
         address: ContractAddress,
         block_number: Option<u64>,
         load_logs: bool,
+        check_alive: bool,
     ) -> Result<ContractChange, String> {
+        if check_alive {
+            let meta = self.load_contract_meta(address.clone())?;
+            if meta.destructed {
+                return Err(format!("Contract already destructed: {:x}", address.0));
+            }
+        }
         let prefix_key = Key::ContractChange {
             address: address.clone(),
             number: None,
@@ -233,17 +239,18 @@ impl Loader {
         Err(String::from("TODO: Loader::load_contract_changes"))
     }
 
-    pub fn load_contract_code(&self, address: ContractAddress) -> Result<ContractCode, String> {
-        let key_bytes = Bytes::from(&Key::ContractCode(address.clone()));
-        if let Some(value) = db_get::<_, value::ContractCode>(&self.db, &key_bytes)? {
-            Ok(ContractCode {
+    pub fn load_contract_meta(&self, address: ContractAddress) -> Result<ContractMeta, String> {
+        let key_bytes = Bytes::from(&Key::ContractMeta(address.clone()));
+        if let Some(value) = db_get::<_, value::ContractMeta>(&self.db, &key_bytes)? {
+            Ok(ContractMeta {
                 address,
                 code: value.code,
                 tx_hash: value.tx_hash,
                 output_index: value.output_index,
+                destructed: value.destructed,
             })
         } else {
-            Err(format!("Contract code not found: {:?}", address))
+            Err(format!("Contract meta not found: {:?}", address))
         }
     }
 
@@ -255,7 +262,7 @@ impl Loader {
         address: Option<H160>,
         filter_topics: Option<Vec<H256>>,
         _limit: Option<usize>,
-    ) -> Result<Vec<LogEntry>, String> {
+    ) -> Result<Vec<(Vec<H256>, Bytes)>, String> {
         Err(String::from("TODO: Loader::load_logs"))
     }
 }

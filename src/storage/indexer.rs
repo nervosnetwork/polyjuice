@@ -14,8 +14,8 @@ use std::time::Duration;
 use super::{db_get, value, Key, Loader};
 use crate::client::HttpRpcClient;
 use crate::types::{
-    h256_to_smth256, smth256_to_h256, ContractAddress, ContractChange, ContractCode, EoaAddress,
-    RunConfig, WitnessData,
+    h256_to_smth256, parse_log, smth256_to_h256, ContractAddress, ContractChange, ContractMeta,
+    EoaAddress, RunConfig, WitnessData,
 };
 
 pub const TYPE_ARGS_LEN: usize = 20;
@@ -111,7 +111,7 @@ impl Indexer {
                                 &Bytes::from(&logs_end_key),
                             );
                             if is_create {
-                                batch.delete(&Bytes::from(&Key::ContractCode(address)));
+                                batch.delete(&Bytes::from(&Key::ContractMeta(address)));
                             }
                         }
                         for (lock_hash, tx_index, output_index, value) in block_delta.added_cells {
@@ -140,6 +140,17 @@ impl Indexer {
                             };
                             batch.put(&Bytes::from(&map_key), &serialize(&map_value).unwrap());
                         }
+                        for contract_address in block_delta.destructed_contracts {
+                            let key_bytes =
+                                Bytes::from(&Key::ContractMeta(contract_address.clone()));
+                            let mut meta: value::ContractMeta = db_get(&self.db, &key_bytes)?
+                                .ok_or_else(|| {
+                                    format!("no such contract: {:x}", contract_address.0)
+                                })?;
+                            assert_eq!(meta.destructed, true);
+                            meta.destructed = false;
+                            batch.put(&key_bytes, &serialize(&meta).unwrap());
+                        }
                         batch.delete(&Bytes::from(&Key::BlockMap(number)));
                         batch.delete(&block_delta_key);
                         // Update last block info
@@ -154,6 +165,7 @@ impl Indexer {
                     None => {
                         // Reach the tip, wait 200ms for next block
                         sleep(Duration::from_millis(200));
+                        // TODO: clean up OLD block delta here (before tip-200)
                         continue;
                     }
                 }
@@ -183,10 +195,11 @@ impl Indexer {
             let mut removed_cells: HashSet<(H256, u64, u32, u32, value::LockLiveCell)> =
                 HashSet::new();
             let mut block_changes: Vec<ContractChange> = Vec::new();
-            let mut block_codes: Vec<ContractCode> = Vec::new();
+            let mut block_codes: Vec<ContractMeta> = Vec::new();
             let mut block_added_cells: HashMap<value::LockLiveCell, value::LiveCellMap> =
                 HashMap::default();
             let mut block_removed_cells: HashSet<value::LockLiveCell> = HashSet::default();
+            let mut destructed_contracts: Vec<ContractAddress> = Vec::new();
             for (tx_index, (tx, tx_hash)) in next_block
                 .transactions
                 .into_iter()
@@ -200,12 +213,14 @@ impl Indexer {
                 //   3. tx_index
 
                 let mut output_addresses: HashSet<ContractAddress> = HashSet::default();
-                let mut contract_inputs: HashMap<ContractAddress, (HashMap<H256, H256>, Bytes)> =
-                    HashMap::default();
+                let mut contract_inputs: HashMap<
+                    ContractAddress,
+                    (HashMap<H256, H256>, Bytes, usize),
+                > = HashMap::default();
                 let mut contract_outputs: HashMap<usize, (ContractAddress, Bytes)> =
                     HashMap::default();
 
-                for input in tx.inputs {
+                for (input_index, input) in tx.inputs.into_iter().enumerate() {
                     // Information from input
                     //   1. is_create
                     //
@@ -235,9 +250,10 @@ impl Indexer {
                             address.clone(),
                             None,
                             false,
+                            true,
                         )?;
                         if contract_inputs
-                            .insert(address, (change.new_storage, data))
+                            .insert(address, (change.new_storage, data, input_index))
                             .is_some()
                         {
                             panic!("Whey type script is not a type_id script?");
@@ -307,8 +323,8 @@ impl Indexer {
                 }
 
                 let mut tx_changes: Vec<ContractChange> = Vec::new();
-                let mut tx_codes: Vec<ContractCode> = Vec::new();
-                for (witness_index, witness) in tx.witnesses.into_iter().enumerate() {
+                let mut tx_codes: Vec<ContractMeta> = Vec::new();
+                for (witness_index, witness) in tx.witnesses.iter().enumerate() {
                     // Information from witness
                     //   1. sender address (from signature in witness type field)
                     //   2. new_storage (after run the validator)
@@ -324,9 +340,9 @@ impl Indexer {
                             &self.run_config,
                             &tx_hash,
                             address,
-                            &witness.into_bytes(),
+                            witness.as_bytes(),
                             output_data,
-                            &contract_inputs,
+                            contract_inputs.remove(address),
                         ) {
                             Ok((sender, new_storage, logs, code)) => {
                                 if is_create {
@@ -354,11 +370,12 @@ impl Indexer {
                                     output_index: output_index as u32,
                                 });
                                 if is_create {
-                                    tx_codes.push(ContractCode {
+                                    tx_codes.push(ContractMeta {
                                         address: address.clone(),
                                         code,
                                         tx_hash: tx_hash.clone(),
                                         output_index: output_index as u32,
+                                        destructed: false,
                                     });
                                 }
                             }
@@ -371,6 +388,40 @@ impl Indexer {
                         }
                     }
                 }
+
+                // The result inputs are selfdestruct contract call
+                for (address, (old_storage, data, input_index)) in contract_inputs {
+                    let witness = tx.witnesses[input_index].as_bytes();
+                    let witness_data = packed::WitnessArgs::from_slice(witness)
+                        .map_err(|err| err.to_string())
+                        .and_then(|witness_args| {
+                            witness_args
+                                .input_type()
+                                .to_opt()
+                                .ok_or_else(|| String::from("can not find input_type in witness"))
+                        })
+                        .map(|witness_data| witness_data.raw_data())
+                        .and_then(|witness_data| {
+                            log::debug!(
+                                "WitnessArgs::input_type => {}",
+                                hex::encode(witness_data.as_ref())
+                            );
+                            WitnessData::try_from(witness_data.as_ref())
+                        })?;
+                    let program_data = witness_data.program_data();
+                    let tree = self
+                        .loader
+                        .load_latest_contract_change(address.clone(), None, false, true)?
+                        .merkle_tree();
+                    let config: Config = (&self.run_config).into();
+                    let result =
+                        run(&config, &tree, &program_data).map_err(|err| err.to_string())?;
+                    if result.selfdestruct.is_none() {
+                        panic!("Not a selfdestruct call: tx_hash={:x}", tx_hash);
+                    }
+                    destructed_contracts.push(address);
+                }
+
                 block_changes.extend(tx_changes);
                 block_codes.extend(tx_codes);
             }
@@ -406,7 +457,7 @@ impl Indexer {
             for code in block_codes {
                 // NOTE: May have another transaction after the contract created
                 block_contracts.insert(code.address.clone(), true);
-                // Key::ContractCode
+                // Key::ContractMeta
                 let db_value_bytes = serialize(&code.db_value()).unwrap();
                 batch.put(&Bytes::from(&code.db_key()), &db_value_bytes);
             }
@@ -458,11 +509,22 @@ impl Indexer {
                 batch.delete(&Bytes::from(&key));
                 batch.delete(&Bytes::from(&Key::LiveCellMap(value.out_point())));
             }
+
+            // selfdestruct
+            for contract_address in &destructed_contracts {
+                let key_bytes = Bytes::from(&Key::ContractMeta(contract_address.clone()));
+                let mut meta: value::ContractMeta = db_get(&self.db, &key_bytes)?
+                    .ok_or_else(|| format!("no such contract: {:x}", contract_address.0))?;
+                assert_eq!(meta.destructed, false);
+                meta.destructed = true;
+                batch.put(&key_bytes, &serialize(&meta).unwrap());
+            }
             // Key::BlockDelta
             let block_delta = value::BlockDelta {
                 contracts: block_contracts.into_iter().collect::<Vec<_>>(),
                 added_cells: added_cells.into_iter().collect::<Vec<_>>(),
                 removed_cells: removed_cells.into_iter().collect::<Vec<_>>(),
+                destructed_contracts,
             };
             let block_contracts_bytes = serialize(&block_delta).unwrap();
             batch.put(
@@ -479,9 +541,9 @@ fn generate_change(
     run_config: &RunConfig,
     tx_hash: &H256,
     address: &ContractAddress,
-    witness: &Bytes,
+    witness: &[u8],
     output_data: &Bytes,
-    contract_inputs: &HashMap<ContractAddress, (HashMap<H256, H256>, Bytes)>,
+    input: Option<(HashMap<H256, H256>, Bytes, usize)>,
 ) -> Result<
     (
         EoaAddress,
@@ -491,7 +553,7 @@ fn generate_change(
     ),
     String,
 > {
-    let witness_data = packed::WitnessArgs::from_slice(witness.as_ref())
+    let witness_data = packed::WitnessArgs::from_slice(witness)
         .map_err(|err| err.to_string())
         .and_then(|witness_args| {
             witness_args
@@ -509,7 +571,7 @@ fn generate_change(
         })?;
     let program_data = witness_data.program_data();
 
-    let (mut tree, code) = if let Some((old_storage, input_data)) = contract_inputs.get(address) {
+    let (mut tree, code) = if let Some((old_storage, input_data, _idx)) = input {
         // Call contract
         let code_hash = blake2b_256(&witness_data.program.code);
         if code_hash[..] != input_data[32..64] {
@@ -523,7 +585,7 @@ fn generate_change(
 
         let mut tree: SparseMerkleTree<CkbBlake2bHasher, SmtH256, DefaultStore<SmtH256>> =
             SparseMerkleTree::default();
-        for (key, value) in old_storage {
+        for (key, value) in &old_storage {
             tree.update(h256_to_smth256(key), h256_to_smth256(value))
                 .unwrap();
         }
@@ -562,7 +624,10 @@ fn generate_change(
         .collect();
 
     let sender = witness_data.recover_sender(tx_hash)?;
-    // TODO: get logs from RunResult
-    let logs = Vec::new();
+    let logs = result
+        .logs
+        .into_iter()
+        .map(|log_data| parse_log(log_data.as_ref()))
+        .collect::<Result<Vec<_>, String>>()?;
     Ok((sender, new_storage, logs, code))
 }

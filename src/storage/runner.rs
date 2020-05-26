@@ -13,7 +13,7 @@ use std::error::Error as StdError;
 
 use super::Loader;
 use crate::types::{
-    CallKind, ContractAddress, EoaAddress, Program, RunConfig, TransactionReceipt, WitnessData,
+    parse_log, ContractAddress, EoaAddress, Program, RunConfig, TransactionReceipt, WitnessData,
     ALWAYS_SUCCESS_SCRIPT, MIN_CELL_CAPACITY, ONE_CKB, SIGHASH_CELL_DEP, SIGHASH_TYPE_HASH,
 };
 
@@ -34,16 +34,20 @@ impl Runner {
         input: Bytes,
     ) -> Result<Bytes, Box<dyn StdError>> {
         log::debug!("loading code ...");
-        let code = self.loader.load_contract_code(destination.clone())?.code;
+        let meta = self.loader.load_contract_meta(destination.clone())?;
+        if meta.destructed {
+            return Err(format!("Contract already destructed: {:x}", destination.0).into());
+        }
+        let code = meta.code;
         let code_hash = blake2b_256(code.as_ref());
         log::debug!("loading change ...");
         let latest_change =
             self.loader
-                .load_latest_contract_change(destination.clone(), None, false)?;
+                .load_latest_contract_change(destination.clone(), None, false, false)?;
         let program = Program::new_call(sender, destination, code, input, true);
 
         let latest_tree = latest_change.merkle_tree();
-        let mut witness_data = WitnessData::new(program.clone());
+        let mut witness_data = WitnessData::new(program);
         let program_data = witness_data.program_data();
 
         let config: Config = (&self.run_config).into();
@@ -68,19 +72,21 @@ impl Runner {
         destination: ContractAddress,
         input: Bytes,
     ) -> Result<TransactionReceipt, Box<dyn StdError>> {
-        let code = self.loader.load_contract_code(destination.clone())?.code;
+        let meta = self.loader.load_contract_meta(destination.clone())?;
+        if meta.destructed {
+            return Err(format!("Contract already destructed: {:x}", destination.0).into());
+        }
+        let code = meta.code;
         let code_hash = blake2b_256(code.as_ref());
         let latest_change =
             self.loader
-                .load_latest_contract_change(destination.clone(), None, false)?;
+                .load_latest_contract_change(destination.clone(), None, false, false)?;
         let (contract_live_cell, latest_contract_data) = self
             .loader
             .load_contract_live_cell(latest_change.tx_hash.clone(), latest_change.output_index)?;
-        assert_eq!(
-            &code_hash[..],
-            &latest_contract_data.as_ref()[32..],
-            "code hash not match"
-        );
+        let latest_root_hash = &latest_contract_data.as_ref()[0..32];
+        let latest_code_hash = &latest_contract_data.as_ref()[32..];
+        assert_eq!(&code_hash[..], latest_code_hash, "code hash not match");
         let program = Program::new_call(sender, destination, code, input, false);
 
         let tx_fee = ONE_CKB;
@@ -88,7 +94,8 @@ impl Runner {
             .loader
             .collect_cells(program.sender.clone(), tx_fee + MIN_CELL_CAPACITY)?;
         let out_point = OutPoint::new(latest_change.tx_hash.pack(), latest_change.output_index);
-        live_cells.push(out_point);
+        // Should add to the head of inputs
+        live_cells.insert(0, out_point);
 
         let latest_tree = latest_change.merkle_tree();
         let mut witness_data = WitnessData::new(program.clone());
@@ -100,9 +107,19 @@ impl Runner {
         );
         log::debug!("[binary]: {}", hex::encode(program_data.as_ref()));
         let config: Config = (&self.run_config).into();
-        let result = run(&config, &latest_tree, &program_data)?;
+        let result = match run(&config, &latest_tree, &program_data) {
+            Ok(result) => result,
+            Err(err) => {
+                log::warn!("Error: {:?}", err);
+                return Err(err);
+            }
+        };
         let proof = result.generate_proof(&latest_tree)?;
         let root_hash = result.committed_root_hash(&latest_tree)?;
+        if result.selfdestruct.is_none() && root_hash.as_slice() == latest_root_hash {
+            // TODO handle value change
+            return Err(String::from("Storage unchanged!").into());
+        }
 
         // 1. cell deps
         // 2. inputs
@@ -111,23 +128,43 @@ impl Runner {
             .map(|out_point| CellInput::new(out_point, 0))
             .collect::<Vec<_>>();
         // 3. outputs
-        let mut output_data = BytesMut::from(root_hash.as_slice());
-        output_data.put(&code_hash[..]);
+        let selfdestruct = result.selfdestruct.is_some();
+        let (output, output_data) = if let Some(ref selfdestruct_target) = result.selfdestruct {
+            let output = CellOutput::new_builder()
+                .lock(
+                    Script::new_builder()
+                        .code_hash(SIGHASH_TYPE_HASH.pack())
+                        .hash_type(ScriptHashType::Type.into())
+                        .args(selfdestruct_target.pack())
+                        .build(),
+                )
+                .capacity(contract_live_cell.capacity())
+                .build();
+            (output, Bytes::default())
+        } else {
+            let mut output_data = BytesMut::from(root_hash.as_slice());
+            output_data.put(&code_hash[..]);
+            (contract_live_cell, output_data.freeze())
+        };
         // 4. witness
-        witness_data.return_data = result.return_data.clone();
+        witness_data.update_result(&result)?;
         let program_data = witness_data.program_data();
         let s = proof.serialize(&program_data)?;
         log::debug!("WitnessData: {}", hex::encode(s.as_ref()));
         let data = BytesOpt::new_builder().set(Some(s.pack())).build();
-        let witness = WitnessArgs::new_builder().output_type(data).build();
+        let witness = if selfdestruct {
+            WitnessArgs::new_builder().input_type(data).build()
+        } else {
+            WitnessArgs::new_builder().output_type(data).build()
+        };
 
         let mut transaction_builder = TransactionBuilder::default()
             .cell_dep(SIGHASH_CELL_DEP.clone())
             .cell_dep(self.run_config.type_dep.clone())
             .inputs(inputs.pack())
             .witness(witness.as_bytes().pack())
-            .output(contract_live_cell)
-            .output_data(output_data.freeze().pack());
+            .output(output)
+            .output_data(output_data.pack());
 
         let capacity_left = total_capacity - tx_fee;
         if capacity_left >= MIN_CELL_CAPACITY {
@@ -149,12 +186,19 @@ impl Runner {
 
         let tx = transaction_builder.build();
         let rpc_tx = json_types::Transaction::from(tx.data());
+        let logs = result
+            .logs
+            .into_iter()
+            .map(|log_data| {
+                parse_log(log_data.as_ref())
+                    .map(|(topics, data)| (topics, json_types::JsonBytes::from_bytes(data)))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         Ok(TransactionReceipt {
             tx: rpc_tx,
             contract_address: None,
             return_data: Some(json_types::JsonBytes::from_bytes(result.return_data)),
-            // TODO: parse `result.logs`
-            logs: Vec::new(),
+            logs,
         })
     }
 
@@ -221,7 +265,7 @@ impl Runner {
                     .set(Some(contract_type_script))
                     .build(),
             )
-            .lock(contract_lock_script.clone())
+            .lock(contract_lock_script)
             .capacity(output_capacity.pack())
             .build();
         let mut output_data = BytesMut::from(root_hash.as_slice());
@@ -254,12 +298,19 @@ impl Runner {
         }
         let tx = transaction_builder.build();
         let rpc_tx = json_types::Transaction::from(tx.data());
+        let logs = result
+            .logs
+            .into_iter()
+            .map(|log_data| {
+                parse_log(log_data.as_ref())
+                    .map(|(topics, data)| (topics, json_types::JsonBytes::from_bytes(data)))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         Ok(TransactionReceipt {
             tx: rpc_tx,
             contract_address: Some(contract_address),
-            // TODO: parse `result.logs`
             return_data: None,
-            logs: Vec::new(),
+            logs,
         })
     }
 }

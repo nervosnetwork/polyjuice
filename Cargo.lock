@@ -433,7 +433,7 @@ dependencies = [
 [[package]]
 name = "ckb-simple-account-layer"
 version = "0.1.0"
-source = "git+https://github.com/TheWaWaR/ckb-simple-account-layer.git?rev=cf2a404#cf2a404ffa172105ab46e4cea7602555e1e30a6d"
+source = "git+https://github.com/TheWaWaR/ckb-simple-account-layer.git?rev=14dfbc8#14dfbc82643e20108c57a14ba6c88736c97a50be"
 dependencies = [
  "blake2b-rs",
  "bytes 0.5.4",

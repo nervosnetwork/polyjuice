@@ -1,6 +1,6 @@
 use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types as json_types;
-use ckb_simple_account_layer::{CkbBlake2bHasher, Config};
+use ckb_simple_account_layer::{CkbBlake2bHasher, Config, RunResult};
 use ckb_types::{
     bytes::{BufMut, Bytes, BytesMut},
     core::{DepType, EpochNumberWithFraction, ScriptHashType},
@@ -101,6 +101,8 @@ pub struct WitnessData {
     pub program: Program,
     /// The return data
     pub return_data: Bytes,
+    /// The call's selfdestruct target
+    pub selfdestruct: Option<H160>,
     /// Provide storage diff and diff proofs.
     pub run_proof: Bytes,
 }
@@ -143,14 +145,15 @@ pub struct Program {
     pub input: Bytes,
 }
 
-/// The contract code
-pub struct ContractCode {
+/// The contract metadata
+pub struct ContractMeta {
     pub address: ContractAddress,
     pub code: Bytes,
     /// The hash of the transaction where the contract created
     pub tx_hash: H256,
     /// The output index of the transaction where the contract created
     pub output_index: u32,
+    pub destructed: bool,
 }
 
 /// Represent a change record of a contract call
@@ -190,14 +193,6 @@ pub struct EoaAddress(pub H160);
 #[derive(Default, Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ContractAddress(pub H160);
 
-/// The log produced by LOG0,LOG1,LOG2,LOG3,LOG4
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LogEntry {
-    pub address: ContractAddress,
-    pub topics: Vec<H256>,
-    pub data: Bytes,
-}
-
 // TODO: Move this struct to server.rs
 /// The transaction receipt
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,7 +202,7 @@ pub struct TransactionReceipt {
     /// The newly created contract's address (Program.depth=0)
     pub contract_address: Option<ContractAddress>,
     pub return_data: Option<json_types::JsonBytes>,
-    pub logs: Vec<LogEntry>,
+    pub logs: Vec<(Vec<H256>, json_types::JsonBytes)>,
 }
 
 impl From<&RunConfig> for Config {
@@ -259,7 +254,7 @@ impl TryFrom<&[u8]> for WitnessData {
     type Error = String;
     fn try_from(data: &[u8]) -> Result<WitnessData, String> {
         let mut offset = 0;
-        let (signature, program, return_data) = {
+        let (signature, program, return_data, selfdestruct) = {
             let program_data = load_var_slice(data, &mut offset)?;
             log::trace!("program_data: {}", hex::encode(&program_data));
             let mut inner_offset = 0;
@@ -270,10 +265,17 @@ impl TryFrom<&[u8]> for WitnessData {
             log::trace!("program: {}", hex::encode(&program_slice));
             let program = Program::try_from(program_slice)?;
             let return_data = load_var_slice(program_data, &mut inner_offset)?;
+            let selfdestruct_target = load_h160(program_data, &mut inner_offset)?;
+            let selfdestruct = if selfdestruct_target == H160::default() {
+                None
+            } else {
+                Some(selfdestruct_target)
+            };
             (
                 Bytes::from(signature[..].to_vec()),
                 program,
                 Bytes::from(return_data.to_vec()),
+                selfdestruct,
             )
         };
         let run_proof = Bytes::from(data[offset..].to_vec());
@@ -281,6 +283,7 @@ impl TryFrom<&[u8]> for WitnessData {
             signature,
             program,
             return_data,
+            selfdestruct,
             run_proof,
         })
     }
@@ -388,8 +391,19 @@ impl WitnessData {
             signature: Bytes::from(vec![0u8; 65]),
             program,
             return_data: Bytes::default(),
+            selfdestruct: None,
             run_proof: Bytes::default(),
         }
+    }
+
+    pub fn update_result(&mut self, result: &RunResult) -> Result<(), String> {
+        self.return_data = result.return_data.clone();
+        self.selfdestruct = result
+            .selfdestruct
+            .clone()
+            .map(|target| H160::from_slice(target.as_ref()).map_err(|err| err.to_string()))
+            .transpose()?;
+        Ok(())
     }
 
     pub fn serialize(&self) -> Bytes {
@@ -409,6 +423,7 @@ impl WitnessData {
         buf.put(program.as_ref());
         buf.put(&(self.return_data.len() as u32).to_le_bytes()[..]);
         buf.put(self.return_data.as_ref());
+        buf.put(self.selfdestruct.clone().unwrap_or_default().as_bytes());
         buf.freeze()
     }
 
@@ -450,15 +465,16 @@ impl WitnessData {
     }
 }
 
-impl ContractCode {
+impl ContractMeta {
     pub fn db_key(&self) -> Key {
-        Key::ContractCode(self.address.clone())
+        Key::ContractMeta(self.address.clone())
     }
-    pub fn db_value(&self) -> value::ContractCode {
-        value::ContractCode {
+    pub fn db_value(&self) -> value::ContractMeta {
+        value::ContractMeta {
             code: self.code.clone(),
             tx_hash: self.tx_hash.clone(),
             output_index: self.output_index,
+            destructed: self.destructed,
         }
     }
 }
@@ -540,19 +556,42 @@ pub fn load_u32(data: &[u8], offset: &mut usize) -> Result<u32, String> {
     Ok(value)
 }
 
-pub fn load_h160(data: &[u8], offset: &mut usize) -> Result<H160, String> {
+pub fn load_fixed_hash<T: std::fmt::LowerHex, F: Fn(&[u8]) -> T>(
+    type_name: &str,
+    data: &[u8],
+    offset: &mut usize,
+    converter: F,
+) -> Result<T, String> {
+    let hash_size: usize = std::mem::size_of::<T>();
     let offset_value = *offset;
-    if data[offset_value..].len() < 20 {
+    if data[offset_value..].len() < hash_size {
         return Err(format!(
-            "Not enough data length to parse H160: data.len={}, offset={}",
+            "Not enough data length to parse {}: data.len={}, offset={}",
+            type_name,
             data.len(),
             offset_value
         ));
     }
-    let inner = H160::from_slice(&data[offset_value..offset_value + 20]).unwrap();
-    log::trace!("[load] H160 : offset={:>3}, value={:x}", offset, inner);
-    *offset += 20;
+    let inner = converter(&data[offset_value..offset_value + hash_size]);
+    log::trace!(
+        "[load] {} : offset={:>3}, value={:x}",
+        type_name,
+        offset,
+        inner
+    );
+    *offset += hash_size;
     Ok(inner)
+}
+
+pub fn load_h160(data: &[u8], offset: &mut usize) -> Result<H160, String> {
+    load_fixed_hash("H160", data, offset, |slice| {
+        H160::from_slice(slice).unwrap()
+    })
+}
+pub fn load_h256(data: &[u8], offset: &mut usize) -> Result<H256, String> {
+    load_fixed_hash("H256", data, offset, |slice| {
+        H256::from_slice(slice).unwrap()
+    })
 }
 
 pub fn load_slice_with_length<'a>(
@@ -586,6 +625,17 @@ pub fn load_var_slice<'a>(data: &'a [u8], offset: &mut usize) -> Result<&'a [u8]
     load_slice_with_length(data, length, offset)
 }
 
+pub fn parse_log(raw: &[u8]) -> Result<(Vec<H256>, Bytes), String> {
+    let mut offset = 0;
+    let data_slice = load_var_slice(raw, &mut offset)?;
+    let mut topics = Vec::new();
+    let topics_count = load_u32(raw, &mut offset)?;
+    for _ in 0..topics_count {
+        topics.push(load_h256(raw, &mut offset)?);
+    }
+    Ok((topics, Bytes::from(data_slice.to_vec())))
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -601,7 +651,7 @@ mod test {
 
     #[test]
     fn test_serde_witness_data() {
-        let data = hex::decode("7b0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000c8328aabcd9b9e8e64fbc566c4385c3bdeb219d700000000000000000000000000000000000000000101000060806040525b607b60006000508190909055505b610018565b60db806100266000396000f3fe60806040526004361060295760003560e01c806360fe47b114602f5780636d4ce63c14605b576029565b60006000fd5b60596004803603602081101560445760006000fd5b81019080803590602001909291905050506084565b005b34801560675760006000fd5b50606e6094565b6040518082815260200191505060405180910390f35b8060006000508190909055505b50565b6000600060005054905060a2565b9056fea26469706673582212204e58804e375d4a732a7b67cce8d8ffa904fa534d4555e655a433ce0a5e0d339f64736f6c63430006060033000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000010000004c").unwrap();
+        let data = hex::decode("95010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000038010000000000000000000000c8328aabcd9b9e8e64fbc566c4385c3bdeb219d7fa36e4fb6bf83b0d4ff5ac34c10e1f56893c9e4edb00000060806040526004361060295760003560e01c806360fe47b114602f5780636d4ce63c14605b576029565b60006000fd5b60596004803603602081101560445760006000fd5b81019080803590602001909291905050506084565b005b34801560675760006000fd5b50606e6094565b6040518082815260200191505060405180910390f35b8060006000508190909055505b50565b6000600060005054905060a2565b9056fea26469706673582212204e58804e375d4a732a7b67cce8d8ffa904fa534d4555e655a433ce0a5e0d339f64736f6c634300060600332400000060fe47b100000000000000000000000000000000000000000000000000000000000000230000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000022010000004c").unwrap();
         WitnessData::try_from(data.as_slice()).unwrap();
 
         let run_proof = RunProofResult::default();
@@ -610,6 +660,7 @@ mod test {
             signature: Bytes::from([1u8; 65].to_vec()),
             program: Program::new_create(Default::default(), Bytes::from("abcdef")),
             return_data: Bytes::from("return data"),
+            selfdestruct: None,
             run_proof: Bytes::from(run_proof_data),
         };
         let program_data = witness_data1.program_data();
