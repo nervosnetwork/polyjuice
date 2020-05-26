@@ -33,7 +33,7 @@ impl Runner {
         sender: EoaAddress,
         destination: ContractAddress,
         input: Bytes,
-    ) -> Result<Bytes, Box<dyn StdError>> {
+    ) -> Result<RunResult, Box<dyn StdError>> {
         log::debug!("loading code ...");
         let meta = self.loader.load_contract_meta(destination.clone())?;
         if meta.destructed {
@@ -45,7 +45,7 @@ impl Runner {
         let latest_change =
             self.loader
                 .load_latest_contract_change(destination.clone(), None, false, false)?;
-        let program = Program::new_call(sender, destination, code, input, true);
+        let program = Program::new_call(sender, destination, code, input, false);
 
         let latest_tree = latest_change.merkle_tree();
         let mut witness_data = WitnessData::new(program);
@@ -58,13 +58,19 @@ impl Runner {
         );
         log::debug!("[binary]: {}", hex::encode(program_data.as_ref()));
         let result = match run(&config, &latest_tree, &program_data) {
-            Ok(result) => result,
+            Ok(result) => {
+                let new_root_hash = result.committed_root_hash(&latest_tree)?;
+                if &new_root_hash != latest_tree.root() {
+                    return Err(String::from("Storage changed in static call").into());
+                }
+                result
+            }
             Err(err) => {
                 log::warn!("Error: {:?}", err);
                 return Err(err);
             }
         };
-        Ok(result.return_data)
+        Ok(result)
     }
 
     pub fn call(

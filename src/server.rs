@@ -3,10 +3,12 @@ use crate::types::{
     parse_log, ContractAddress, ContractChange, ContractMeta, EoaAddress, RunConfig,
 };
 use ckb_jsonrpc_types::{JsonBytes, Transaction};
+use ckb_simple_account_layer::RunResult;
 use ckb_types::{bytes::Bytes, H256};
 use jsonrpc_core::{Error, ErrorCode, Result as RpcResult};
 use jsonrpc_derive::rpc;
 use serde::{Deserialize, Serialize};
+use std::convert::TryFrom;
 use std::error::Error as StdError;
 use std::sync::Arc;
 
@@ -29,7 +31,7 @@ pub trait Rpc {
         sender: EoaAddress,
         contract_address: ContractAddress,
         input: JsonBytes,
-    ) -> RpcResult<JsonBytes>;
+    ) -> RpcResult<StaticCallResponse>;
 
     #[rpc(name = "get_code")]
     fn get_code(&self, contract_address: ContractAddress) -> RpcResult<ContractCodeJson>;
@@ -116,13 +118,13 @@ impl Rpc for RpcImpl {
         sender: EoaAddress,
         contract_address: ContractAddress,
         input: JsonBytes,
-    ) -> RpcResult<JsonBytes> {
+    ) -> RpcResult<StaticCallResponse> {
         let loader = Loader::clone(&self.loader);
         let run_config = self.run_config.clone();
-        Runner::new(loader, run_config)
-            .static_call(sender, contract_address, input.into_bytes())
-            .map(JsonBytes::from_bytes)
-            .map_err(convert_err_box)
+        let result = Runner::new(loader, run_config)
+            .static_call(sender, contract_address.clone(), input.into_bytes())
+            .map_err(convert_err_box)?;
+        StaticCallResponse::try_from((result, contract_address)).map_err(convert_err)
     }
 
     fn get_code(&self, contract_address: ContractAddress) -> RpcResult<ContractCodeJson> {
@@ -279,4 +281,23 @@ pub struct TransactionReceipt {
 pub struct StaticCallResponse {
     return_data: JsonBytes,
     logs: Vec<LogEntry>,
+}
+
+impl TryFrom<(RunResult, ContractAddress)> for StaticCallResponse {
+    type Error = String;
+    fn try_from(
+        (result, contract_address): (RunResult, ContractAddress),
+    ) -> Result<StaticCallResponse, String> {
+        Ok(StaticCallResponse {
+            return_data: JsonBytes::from_bytes(result.return_data),
+            logs: result
+                .logs
+                .into_iter()
+                .map(|log_data| {
+                    parse_log(log_data.as_ref())
+                        .map(|(topics, data)| LogEntry::new(contract_address.clone(), topics, data))
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        })
+    }
 }
