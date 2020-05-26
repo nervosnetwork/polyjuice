@@ -36,6 +36,13 @@ pub trait Rpc {
     #[rpc(name = "get_code")]
     fn get_code(&self, contract_address: ContractAddress) -> RpcResult<ContractCodeJson>;
 
+    #[rpc(name = "get_contract_list")]
+    fn get_contract_list(
+        &self,
+        from_block: u64,
+        to_block: Option<u64>,
+    ) -> RpcResult<Vec<ContractMetaJson>>;
+
     #[rpc(name = "get_change")]
     fn get_change(
         &self,
@@ -131,6 +138,23 @@ impl Rpc for RpcImpl {
         self.loader
             .load_contract_meta(contract_address)
             .map(ContractCodeJson::from)
+            .map_err(convert_err)
+    }
+
+    fn get_contract_list(
+        &self,
+        from_block: u64,
+        to_block: Option<u64>,
+    ) -> RpcResult<Vec<ContractMetaJson>> {
+        let mut loader = Loader::clone(&self.loader);
+        loader
+            .load_contract_meta_list(from_block, to_block)
+            .map(|metas| {
+                metas
+                    .into_iter()
+                    .map(|(number, meta)| ContractMetaJson::new(number, meta))
+                    .collect::<Vec<_>>()
+            })
             .map_err(convert_err)
     }
 
@@ -299,5 +323,35 @@ impl TryFrom<(RunResult, ContractAddress)> for StaticCallResponse {
                 })
                 .collect::<Result<Vec<_>, String>>()?,
         })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractMetaJson {
+    /// The block where the contract created
+    pub block_number: u64,
+    /// The contract address
+    pub address: ContractAddress,
+
+    /// The contract code
+    pub code: JsonBytes,
+    /// The hash of the transaction where the contract created
+    pub tx_hash: H256,
+    /// The output index of the transaction where the contract created
+    pub output_index: u32,
+    /// Check if the contract is destructed
+    pub destructed: bool,
+}
+
+impl ContractMetaJson {
+    pub fn new(block_number: u64, meta: ContractMeta) -> ContractMetaJson {
+        ContractMetaJson {
+            block_number,
+            address: meta.address,
+            code: JsonBytes::from_bytes(meta.code),
+            tx_hash: meta.tx_hash,
+            output_index: meta.output_index,
+            destructed: meta.destructed,
+        }
     }
 }

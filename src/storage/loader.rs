@@ -241,6 +241,47 @@ impl Loader {
         Err(String::from("TODO: Loader::load_contract_changes"))
     }
 
+    pub fn load_contract_meta_list(
+        &mut self,
+        from_block: u64,
+        to_block: Option<u64>,
+    ) -> Result<Vec<(u64, ContractMeta)>, String> {
+        let to_block = to_block
+            .map(Ok)
+            .unwrap_or_else(|| self.client.get_tip_block_number())?;
+
+        let mut all_metas = Vec::new();
+        for number in from_block..=to_block {
+            let key_bytes = Bytes::from(&Key::BlockDelta(number));
+            let block_delta = match db_get::<_, value::BlockDelta>(&self.db, &key_bytes)? {
+                Some(block_delta) => block_delta,
+                None => {
+                    return Ok(all_metas);
+                }
+            };
+            for addr in block_delta
+                .contracts
+                .into_iter()
+                .filter(|(_, is_create)| *is_create)
+                .map(|(addr, _)| addr)
+            {
+                let key_bytes = Bytes::from(&Key::ContractMeta(addr.clone()));
+                let meta = db_get::<_, value::ContractMeta>(&self.db, &key_bytes)?.unwrap();
+                all_metas.push((
+                    number,
+                    ContractMeta {
+                        address: addr.clone(),
+                        code: meta.code,
+                        tx_hash: meta.tx_hash,
+                        output_index: meta.output_index,
+                        destructed: meta.destructed,
+                    },
+                ));
+            }
+        }
+        Ok(all_metas)
+    }
+
     pub fn load_contract_meta(&self, address: ContractAddress) -> Result<ContractMeta, String> {
         let key_bytes = Bytes::from(&Key::ContractMeta(address.clone()));
         if let Some(value) = db_get::<_, value::ContractMeta>(&self.db, &key_bytes)? {
