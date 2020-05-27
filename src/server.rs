@@ -36,8 +36,8 @@ pub trait Rpc {
     #[rpc(name = "get_code")]
     fn get_code(&self, contract_address: ContractAddress) -> RpcResult<ContractCodeJson>;
 
-    #[rpc(name = "get_contract_list")]
-    fn get_contract_list(
+    #[rpc(name = "get_contracts")]
+    fn get_contracts(
         &self,
         from_block: u64,
         to_block: Option<u64>,
@@ -141,7 +141,7 @@ impl Rpc for RpcImpl {
             .map_err(convert_err)
     }
 
-    fn get_contract_list(
+    fn get_contracts(
         &self,
         from_block: u64,
         to_block: Option<u64>,

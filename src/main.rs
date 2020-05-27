@@ -221,16 +221,15 @@ fn main() -> Result<(), String> {
                     secp256k1::SecretKey::from_slice(data.as_slice()).map_err(|err| err.to_string())
                 })?;
             // TODO: may not just the first witness
-            let raw_witness =
+            let witness_args =
                 packed::WitnessArgs::from_slice(tx_receipt.tx.witnesses[0].as_bytes())
-                    .map_err(|err| err.to_string())
-                    .and_then(|witness_args| {
-                        witness_args
-                            .output_type()
-                            .to_opt()
-                            .ok_or_else(|| String::from("can not find output_type in witness"))
-                    })
-                    .map(|witness_data| witness_data.raw_data())?;
+                    .map_err(|err| err.to_string())?;
+            let raw_witness = witness_args
+                .output_type()
+                .to_opt()
+                .or_else(|| witness_args.input_type().to_opt())
+                .ok_or_else(|| String::from("can not find output_type/input_type in witness"))
+                .map(|witness_data| witness_data.raw_data())?;
             let mut witness_data = WitnessData::try_from(raw_witness.as_ref())?;
 
             println!("Building signature");
@@ -249,11 +248,12 @@ fn main() -> Result<(), String> {
             let data = packed::BytesOpt::new_builder()
                 .set(Some(raw_witness.pack()))
                 .build();
-            let witness = packed::WitnessArgs::from_slice(tx_receipt.tx.witnesses[0].as_bytes())
-                .unwrap()
-                .as_builder()
-                .output_type(data)
-                .build();
+            let witness = if witness_args.output_type().to_opt().is_some() {
+                witness_args.as_builder().output_type(data).build()
+            } else {
+                witness_args.as_builder().input_type(data).build()
+            };
+
             tx_receipt.tx.witnesses[0] = json_types::JsonBytes::from_bytes(witness.as_bytes());
             let tx_body: serde_json::Value = serde_json::to_value(&tx_receipt.tx).unwrap();
 
@@ -265,7 +265,12 @@ fn main() -> Result<(), String> {
                 .args(&["tx", "init", "--tx-file", tx_path_str])
                 .output()
                 .expect("Failed to execute command");
-            println!("output: {:?}", output);
+            if output.status.success() {
+                println!("success!");
+            } else {
+                println!("[stdout]: {}", String::from_utf8_lossy(&output.stdout));
+                println!("[stderr]: {}", String::from_utf8_lossy(&output.stderr));
+            }
 
             // Replace transaction in --tx-file
             let cli_tx_content = fs::read_to_string(tx_path_str).unwrap();
@@ -294,7 +299,12 @@ fn main() -> Result<(), String> {
                 ])
                 .output()
                 .expect("Failed to execute command");
-            println!("output: {:?}", output);
+            if output.status.success() {
+                println!("success!");
+            } else {
+                println!("[stdout]: {}", String::from_utf8_lossy(&output.stdout));
+                println!("[stderr]: {}", String::from_utf8_lossy(&output.stderr));
+            }
 
             let cli_tx_content = fs::read_to_string(tx_path_str).unwrap();
             if let Some(output) = m.value_of("output") {

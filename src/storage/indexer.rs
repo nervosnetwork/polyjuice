@@ -419,6 +419,13 @@ impl Indexer {
                     if result.selfdestruct.is_none() {
                         panic!("Not a selfdestruct call: tx_hash={:x}", tx_hash);
                     }
+                    let sender = witness_data.recover_sender(&tx_hash)?;
+                    assert_eq!(sender, witness_data.program.sender);
+                    log::info!(
+                        "[SELFDESTRUCT]: sender={:x}, contract={:x}",
+                        sender.0,
+                        address.0
+                    );
                     destructed_contracts.push(address);
                 }
 
@@ -626,6 +633,7 @@ fn generate_change(
         .collect();
 
     let sender = witness_data.recover_sender(tx_hash)?;
+    assert_eq!(sender, witness_data.program.sender);
     let logs = result
         .logs
         .into_iter()

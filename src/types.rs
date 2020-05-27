@@ -428,8 +428,8 @@ impl WitnessData {
         let mut program_data = self.program_data();
         let mut data = BytesMut::from(tx_hash.as_bytes());
         data.put(&(program_data.len() as u32).to_le_bytes()[..]);
-        data.put(&[0u8; 32][..]);
-        data.put(&program_data.as_ref()[32..]);
+        data.put(&[0u8; 65][..]);
+        data.put(&program_data.as_ref()[65..]);
         data.put(self.run_proof.as_ref());
         data.freeze()
     }
@@ -442,11 +442,9 @@ impl WitnessData {
 
     pub fn recover_pubkey(&self, tx_hash: &H256) -> Result<secp256k1::PublicKey, String> {
         let message = self.secp_message(tx_hash)?;
-        let mut signature_data = [0u8; 64];
-        signature_data.copy_from_slice(&self.signature[0..64]);
         let recov_id =
             RecoveryId::from_i32(self.signature[64] as i32).map_err(|err| err.to_string())?;
-        let signature = RecoverableSignature::from_compact(&signature_data[..], recov_id)
+        let signature = RecoverableSignature::from_compact(&self.signature[0..64], recov_id)
             .map_err(|err| err.to_string())?;
         SECP256K1
             .recover(&message, &signature)
