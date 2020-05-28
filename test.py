@@ -58,12 +58,13 @@ def call_contract(contract_address, args, is_static=False):
 
 def run_cmd(cmd):
     print('[RUN]: {}'.format(cmd))
-    os.system(cmd)
+    output = subprocess.check_output(cmd, shell=True).strip().decode('utf-8')
+    print('[Output]: {}'.format(output))
 
 def commit_tx(result, action_name):
     result_path = os.path.join(target_dir, '{}.json'.format(action_name))
     with open(result_path, 'w') as f:
-        json.dump(result, f)
+        json.dump(result, f, indent=4)
     tx_path = os.path.join(target_dir, '{}-tx.json'.format(action_name))
     run_cmd('polyjuice-ng sign-tx -k {} -t {} -o {}'.format(privkey_path, result_path, tx_path))
     run_cmd('ckb-cli tx send --tx-file {} --skip-check'.format(tx_path))
@@ -79,6 +80,7 @@ def create_contract_by_name(name, constructor_args=""):
 def test_simple_storage():
     contract_name = SIMPLE_STORAGE
     contract_address = create_contract_by_name(contract_name)
+
     for args in [
             "0x60fe47b10000000000000000000000000000000000000000000000000000000000000d10",
             "0x60fe47b10000000000000000000000000000000000000000000000000000000000000ccc",
@@ -101,8 +103,8 @@ def test_log_events():
 
 def test_self_destruct():
     contract_name = SELF_DESTRUCT
-
     contract_address = create_contract_by_name(contract_name, "000000000000000000000000b2e61ff569acf041b3c2c17724e2379c581eeac3")
+
     args = "0xae8421e1"
     result = call_contract(contract_address, args)
     action_name = "call-{}-{}-{}".format(contract_name, contract_address, args)

@@ -383,6 +383,7 @@ impl Indexer {
                             witness.as_bytes(),
                             output_data,
                             contract_inputs.remove(address),
+                            is_create,
                         ) {
                             Ok((sender, new_storage, logs, code)) => {
                                 if is_create {
@@ -593,6 +594,7 @@ fn generate_change(
     witness: &[u8],
     output_data: &Bytes,
     input: Option<(HashMap<H256, H256>, Bytes, usize)>,
+    is_create: bool,
 ) -> Result<
     (
         EoaAddress,
@@ -605,8 +607,12 @@ fn generate_change(
     let witness_data = packed::WitnessArgs::from_slice(witness)
         .map_err(|err| err.to_string())
         .and_then(|witness_args| {
-            witness_args
-                .output_type()
+            let actual_witness = if is_create {
+                witness_args.output_type()
+            } else {
+                witness_args.input_type()
+            };
+            actual_witness
                 .to_opt()
                 .ok_or_else(|| String::from("can not find output_type in witness"))
         })

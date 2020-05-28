@@ -159,11 +159,7 @@ impl Runner {
         let s = proof.serialize(&program_data)?;
         log::debug!("WitnessData: {}", hex::encode(s.as_ref()));
         let data = BytesOpt::new_builder().set(Some(s.pack())).build();
-        let witness = if result.selfdestruct.is_some() {
-            WitnessArgs::new_builder().input_type(data).build()
-        } else {
-            WitnessArgs::new_builder().output_type(data).build()
-        };
+        let witness = WitnessArgs::new_builder().input_type(data).build();
 
         let mut transaction_builder = TransactionBuilder::default()
             .cell_dep(SIGHASH_CELL_DEP.clone())
