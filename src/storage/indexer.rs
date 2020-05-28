@@ -166,7 +166,7 @@ impl Indexer {
                     }
                     None => {
                         // Reach the tip, wait 200ms for next block
-                        sleep(Duration::from_millis(200));
+                        sleep(Duration::from_millis(100));
                         // TODO: clean up OLD block delta here (before tip-200)
                         continue;
                     }

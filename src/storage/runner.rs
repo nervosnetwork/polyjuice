@@ -136,7 +136,6 @@ impl Runner {
             .map(|out_point| CellInput::new(out_point, 0))
             .collect::<Vec<_>>();
         // 3. outputs
-        let selfdestruct = result.selfdestruct.is_some();
         let (output, output_data) = if let Some(ref selfdestruct_target) = result.selfdestruct {
             let output = CellOutput::new_builder()
                 .lock(
@@ -160,7 +159,7 @@ impl Runner {
         let s = proof.serialize(&program_data)?;
         log::debug!("WitnessData: {}", hex::encode(s.as_ref()));
         let data = BytesOpt::new_builder().set(Some(s.pack())).build();
-        let witness = if selfdestruct {
+        let witness = if result.selfdestruct.is_some() {
             WitnessArgs::new_builder().input_type(data).build()
         } else {
             WitnessArgs::new_builder().output_type(data).build()
