@@ -2,6 +2,7 @@ use crate::storage::{Loader, Runner};
 use crate::types::{
     parse_log, ContractAddress, ContractChange, ContractMeta, EoaAddress, RunConfig,
 };
+use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::{JsonBytes, Transaction};
 use ckb_simple_account_layer::RunResult;
 use ckb_types::{bytes::Bytes, H256};
@@ -335,6 +336,8 @@ pub struct ContractMetaJson {
 
     /// The contract code
     pub code: JsonBytes,
+    /// The contract code hash
+    pub code_hash: H256,
     /// The hash of the transaction where the contract created
     pub tx_hash: H256,
     /// The output index of the transaction where the contract created
@@ -345,10 +348,12 @@ pub struct ContractMetaJson {
 
 impl ContractMetaJson {
     pub fn new(block_number: u64, meta: ContractMeta) -> ContractMetaJson {
+        let code_hash = H256::from_slice(&blake2b_256(meta.code.as_ref())[..]).unwrap();
         ContractMetaJson {
             block_number,
             address: meta.address,
             code: JsonBytes::from_bytes(meta.code),
+            code_hash,
             tx_hash: meta.tx_hash,
             output_index: meta.output_index,
             destructed: meta.destructed,

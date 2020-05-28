@@ -34,14 +34,12 @@ impl Runner {
         destination: ContractAddress,
         input: Bytes,
     ) -> Result<RunResult, Box<dyn StdError>> {
-        log::debug!("loading code ...");
         let meta = self.loader.load_contract_meta(destination.clone())?;
         if meta.destructed {
             return Err(format!("Contract already destructed: {:x}", destination.0).into());
         }
         let code = meta.code;
         let code_hash = blake2b_256(code.as_ref());
-        log::debug!("loading change ...");
         let latest_change =
             self.loader
                 .load_latest_contract_change(destination.clone(), None, false, false)?;
@@ -270,7 +268,10 @@ impl Runner {
             .capacity(output_capacity.pack())
             .build();
         let mut output_data = BytesMut::from(root_hash.as_slice());
-        output_data.put(&blake2b_256(result.return_data.as_ref())[..]);
+        let code_hash = blake2b_256(result.return_data.as_ref());
+        log::debug!("code: {}", hex::encode(result.return_data.as_ref()));
+        log::debug!("code hash: {}", hex::encode(&code_hash[..]));
+        output_data.put(&code_hash[..]);
 
         let mut transaction_builder = TransactionBuilder::default()
             .cell_dep(SIGHASH_CELL_DEP.clone())
