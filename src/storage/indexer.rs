@@ -49,6 +49,8 @@ impl Indexer {
                 core::ScriptHashType::try_from(self.run_config.type_script.hash_type()).unwrap();
             ScriptHashType::from(ty)
         };
+        log::info!("type code hash: {:x}", type_code_hash);
+        log::info!("type hash type: {:?}", type_hash_type);
         let last_block_key_bytes = Bytes::from(&Key::Last);
         loop {
             let next_header = if let Some(value::Last { number, hash }) =
@@ -236,14 +238,28 @@ impl Indexer {
                         .inner;
                     let prev_index = input.previous_output.index.value() as usize;
                     let output = prev_tx.outputs[prev_index].clone();
+                    let output_data_size = prev_tx.outputs_data[prev_index].len() as u32;
                     let data = prev_tx.outputs_data[prev_index].clone().into_bytes();
                     let capacity = output.capacity.value();
+                    if let Some(ref type_script) = output.type_ {
+                        log::debug!(
+                            "inputs[{}]: type_script.code_hash={:x}",
+                            input_index,
+                            type_script.code_hash
+                        );
+                        log::debug!(
+                            "inputs[{}]: type_script.hash_type={:?}",
+                            input_index,
+                            type_script.hash_type
+                        );
+                    }
                     let type_script = output.type_.clone().unwrap_or_default();
                     if data.len() == OUTPUT_DATA_LEN
                         && type_script.code_hash == type_code_hash
                         && type_script.hash_type == type_hash_type
                         && type_script.args.len() == TYPE_ARGS_LEN
                     {
+                        log::debug!("match type script: input_index={}", input_index);
                         let address = ContractAddress::try_from(type_script.args.as_bytes())
                             .expect("checked length");
                         let change = self.loader.load_latest_contract_change(
@@ -269,6 +285,11 @@ impl Indexer {
                         tx_hash: prev_tx_hash,
                         output_index: prev_output_index,
                         capacity,
+                        data_size: output_data_size,
+                        type_script_hash: output
+                            .type_
+                            .map(packed::Script::from)
+                            .map(|data| data.calc_script_hash().unpack()),
                     };
                     let info: value::LiveCellMap =
                         block_added_cells.get(&value).cloned().unwrap_or_else(|| {
@@ -291,12 +312,26 @@ impl Indexer {
                     //   1. contract address
                     //   2. output_index
                     let data = tx.outputs_data[output_index].clone().into_bytes();
+                    let data_size = data.len() as u32;
+                    if let Some(ref type_script) = output.type_ {
+                        log::debug!(
+                            "outputs[{}]: type_script.code_hash={:x}",
+                            output_index,
+                            type_script.code_hash
+                        );
+                        log::debug!(
+                            "outputs[{}]: type_script.hash_type={:?}",
+                            output_index,
+                            type_script.hash_type
+                        );
+                    }
                     let type_script = output.type_.clone().unwrap_or_default();
                     if data.len() == OUTPUT_DATA_LEN
                         && type_script.code_hash == type_code_hash
                         && type_script.hash_type == type_hash_type
                         && type_script.args.len() == TYPE_ARGS_LEN
                     {
+                        log::debug!("match type script: output_index={}", output_index);
                         let address = ContractAddress::try_from(type_script.args.as_bytes())
                             .expect("checked length");
                         if !output_addresses.insert(address.clone()) {
@@ -311,6 +346,11 @@ impl Indexer {
                         tx_hash: tx_hash.clone(),
                         output_index: output_index as u32,
                         capacity: output.capacity.value(),
+                        data_size,
+                        type_script_hash: output
+                            .type_
+                            .map(packed::Script::from)
+                            .map(|data| data.calc_script_hash().unpack()),
                     };
                     block_added_cells.insert(
                         value.clone(),

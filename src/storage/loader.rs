@@ -122,8 +122,14 @@ impl Loader {
                         panic!("DB corrupted deserialize Key::LockLiveCell");
                     }
                 };
-                if !is_mature(max_mature_number, number, tx_index) {
-                    // Ignore immature cells
+                if !is_mature(max_mature_number, number, tx_index)
+                    || value.type_script_hash.is_some()
+                    || value.data_size > 0
+                {
+                    // Ignore:
+                    //   * immature cells
+                    //   * cell with type script
+                    //   * cell with output data
                     continue;
                 }
                 live_cells.push(value.out_point());

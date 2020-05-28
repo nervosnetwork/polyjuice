@@ -348,20 +348,13 @@ pub mod value {
         pub tx_hash: H256,
         pub output_index: u32,
         pub capacity: u64,
+        pub type_script_hash: Option<H256>,
+        pub data_size: u32,
     }
 
     impl LockLiveCell {
         pub fn out_point(&self) -> packed::OutPoint {
             packed::OutPoint::new(self.tx_hash.pack(), self.output_index)
-        }
-    }
-    impl From<(packed::OutPoint, u64)> for LockLiveCell {
-        fn from((out_point, capacity): (packed::OutPoint, u64)) -> LockLiveCell {
-            LockLiveCell {
-                tx_hash: out_point.tx_hash().unpack(),
-                output_index: out_point.index().unpack(),
-                capacity,
-            }
         }
     }
 

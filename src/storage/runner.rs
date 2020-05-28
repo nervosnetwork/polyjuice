@@ -1,5 +1,5 @@
 use ckb_hash::{blake2b_256, new_blake2b};
-use ckb_simple_account_layer::{run, CkbBlake2bHasher, Config, RunResult};
+use ckb_simple_account_layer::{run, CkbBlake2bHasher, Config, RunProofResult, RunResult};
 use ckb_types::{
     bytes::{BufMut, Bytes, BytesMut},
     core::{ScriptHashType, TransactionBuilder},
@@ -122,6 +122,7 @@ impl Runner {
             }
         };
         let proof = result.generate_proof(&latest_tree)?;
+        print_proof(&proof);
         let root_hash = result.committed_root_hash(&latest_tree)?;
         if result.selfdestruct.is_none() && root_hash.as_slice() == latest_root_hash {
             // TODO handle value change
@@ -168,6 +169,7 @@ impl Runner {
         let mut transaction_builder = TransactionBuilder::default()
             .cell_dep(SIGHASH_CELL_DEP.clone())
             .cell_dep(self.run_config.type_dep.clone())
+            .cell_dep(self.run_config.lock_dep.clone())
             .inputs(inputs.pack())
             .witness(witness.as_bytes().pack())
             .output(output)
@@ -229,6 +231,7 @@ impl Runner {
             }
         };
         let proof = result.generate_proof(&latest_tree)?;
+        print_proof(&proof);
         let root_hash = result.committed_root_hash(&latest_tree)?;
 
         let inputs = live_cells
@@ -277,6 +280,7 @@ impl Runner {
         let mut transaction_builder = TransactionBuilder::default()
             .cell_dep(SIGHASH_CELL_DEP.clone())
             .cell_dep(self.run_config.type_dep.clone())
+            .cell_dep(self.run_config.lock_dep.clone())
             .inputs(inputs.pack())
             .witness(witness.as_bytes().pack())
             .output(output)
@@ -302,4 +306,29 @@ impl Runner {
         let tx = transaction_builder.build();
         Ok((contract_address, tx.data(), result))
     }
+}
+
+fn print_proof(proof: &RunProofResult) {
+    for (i, (key, value)) in proof.read_values.iter().enumerate() {
+        log::debug!(
+            "read_values[{}]: {} => \n {}",
+            i,
+            hex::encode(key.as_slice()),
+            hex::encode(value.as_slice())
+        );
+    }
+    log::debug!("read_proof: 0x{}", hex::encode(&proof.read_proof[..]));
+    for (i, (key, old_value, new_value)) in proof.write_values.iter().enumerate() {
+        log::debug!(
+            "write_values[{}]: {} => \n (old={}, new={})",
+            i,
+            hex::encode(key.as_slice()),
+            hex::encode(old_value.as_slice()),
+            hex::encode(new_value.as_slice())
+        );
+    }
+    log::debug!(
+        "write_old_proof: 0x{}",
+        hex::encode(&proof.write_old_proof[..])
+    );
 }
