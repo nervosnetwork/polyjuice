@@ -4,7 +4,7 @@ mod runner;
 
 pub use indexer::Indexer;
 pub use loader::Loader;
-pub use runner::Runner;
+pub use runner::{CsalRunContext, Runner};
 
 use crate::types::ContractAddress;
 use bincode::deserialize;

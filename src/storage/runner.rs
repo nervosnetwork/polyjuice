@@ -1,5 +1,7 @@
 use ckb_hash::{blake2b_256, new_blake2b};
-use ckb_simple_account_layer::{run, CkbBlake2bHasher, Config, RunProofResult, RunResult};
+use ckb_simple_account_layer::{
+    run_with_context, CkbBlake2bHasher, Config, RunContext, RunProofResult, RunResult,
+};
 use ckb_types::{
     bytes::{BufMut, Bytes, BytesMut},
     core::{ScriptHashType, TransactionBuilder},
@@ -8,6 +10,10 @@ use ckb_types::{
     },
     prelude::*,
     H160,
+};
+use ckb_vm::{
+    registers::{A0, A1, A7},
+    Error as VMError, Memory, Register, SupportMachine,
 };
 use sparse_merkle_tree::{default_store::DefaultStore, SparseMerkleTree, H256 as SmtH256};
 use std::error::Error as StdError;
@@ -33,7 +39,7 @@ impl Runner {
         sender: EoaAddress,
         destination: ContractAddress,
         input: Bytes,
-    ) -> Result<RunResult, Box<dyn StdError>> {
+    ) -> Result<(RunResult, CsalRunContext), Box<dyn StdError>> {
         let meta = self.loader.load_contract_meta(destination.clone())?;
         if meta.destructed {
             return Err(format!("Contract already destructed: {:x}", destination.0).into());
@@ -55,7 +61,8 @@ impl Runner {
             hex::encode(&(program_data.len() as u32).to_le_bytes()[..])
         );
         log::debug!("[binary]: {}", hex::encode(program_data.as_ref()));
-        let result = match run(&config, &latest_tree, &program_data) {
+        let mut context = CsalRunContext::default();
+        let result = match run_with_context(&config, &latest_tree, &program_data, &mut context) {
             Ok(result) => {
                 let new_root_hash = result.committed_root_hash(&latest_tree)?;
                 if &new_root_hash != latest_tree.root() {
@@ -68,7 +75,8 @@ impl Runner {
                 return Err(err);
             }
         };
-        Ok(result)
+        // TODO: merge with context
+        Ok((result, context))
     }
 
     pub fn call(
@@ -76,7 +84,7 @@ impl Runner {
         sender: EoaAddress,
         destination: ContractAddress,
         input: Bytes,
-    ) -> Result<(Transaction, RunResult), Box<dyn StdError>> {
+    ) -> Result<(Transaction, RunResult, CsalRunContext), Box<dyn StdError>> {
         let meta = self.loader.load_contract_meta(destination.clone())?;
         if meta.destructed {
             return Err(format!("Contract already destructed: {:x}", destination.0).into());
@@ -112,7 +120,8 @@ impl Runner {
         );
         log::debug!("[binary]: {}", hex::encode(program_data.as_ref()));
         let config: Config = (&self.run_config).into();
-        let result = match run(&config, &latest_tree, &program_data) {
+        let mut context = CsalRunContext::default();
+        let result = match run_with_context(&config, &latest_tree, &program_data, &mut context) {
             Ok(result) => result,
             Err(err) => {
                 log::warn!("Error: {:?}", err);
@@ -122,7 +131,7 @@ impl Runner {
         let proof = result.generate_proof(&latest_tree)?;
         print_proof(&proof);
         let root_hash = result.committed_root_hash(&latest_tree)?;
-        if result.selfdestruct.is_none() && root_hash.as_slice() == latest_root_hash {
+        if context.selfdestruct.is_none() && root_hash.as_slice() == latest_root_hash {
             // TODO handle value change
             return Err(String::from("Storage unchanged!").into());
         }
@@ -134,7 +143,7 @@ impl Runner {
             .map(|out_point| CellInput::new(out_point, 0))
             .collect::<Vec<_>>();
         // 3. outputs
-        let (output, output_data) = if let Some(ref selfdestruct_target) = result.selfdestruct {
+        let (output, output_data) = if let Some(ref selfdestruct_target) = context.selfdestruct {
             let output = CellOutput::new_builder()
                 .lock(
                     Script::new_builder()
@@ -152,7 +161,7 @@ impl Runner {
             (contract_live_cell, output_data.freeze())
         };
         // 4. witness
-        witness_data.update_result(&result)?;
+        witness_data.update(&context)?;
         let program_data = witness_data.program_data();
         let s = proof.serialize(&program_data)?;
         log::debug!("WitnessData: {}", hex::encode(s.as_ref()));
@@ -187,14 +196,14 @@ impl Runner {
         }
 
         let tx = transaction_builder.build();
-        Ok((tx.data(), result))
+        Ok((tx.data(), result, context))
     }
 
     pub fn create(
         &mut self,
         sender: EoaAddress,
         code: Bytes,
-    ) -> Result<(ContractAddress, Transaction, RunResult), Box<dyn StdError>> {
+    ) -> Result<(ContractAddress, Transaction, RunResult, CsalRunContext), Box<dyn StdError>> {
         let program = Program::new_create(sender, code);
 
         // TODO: let user choose the lock
@@ -216,7 +225,8 @@ impl Runner {
         );
         log::debug!("[binary]: {}", hex::encode(program_data.as_ref()));
         let config: Config = (&self.run_config).into();
-        let result = match run(&config, &latest_tree, &program_data) {
+        let mut context = CsalRunContext::default();
+        let result = match run_with_context(&config, &latest_tree, &program_data, &mut context) {
             Ok(result) => result,
             Err(err) => {
                 log::warn!("Error: {:?}", err);
@@ -252,7 +262,7 @@ impl Runner {
             .args(type_id_args.pack())
             .build();
 
-        witness_data.return_data = result.return_data.clone();
+        witness_data.return_data = context.return_data.clone();
         let program_data = witness_data.program_data();
         let s = proof.serialize(&program_data)?;
         log::debug!("WitnessData: {}", hex::encode(s.as_ref()));
@@ -268,8 +278,8 @@ impl Runner {
             .capacity(output_capacity.pack())
             .build();
         let mut output_data = BytesMut::from(root_hash.as_slice());
-        let code_hash = blake2b_256(result.return_data.as_ref());
-        log::debug!("code: {}", hex::encode(result.return_data.as_ref()));
+        let code_hash = blake2b_256(context.return_data.as_ref());
+        log::debug!("code: {}", hex::encode(context.return_data.as_ref()));
         log::debug!("code hash: {}", hex::encode(&code_hash[..]));
         output_data.put(&code_hash[..]);
 
@@ -300,8 +310,63 @@ impl Runner {
                 .output_data(Bytes::default().pack());
         }
         let tx = transaction_builder.build();
-        Ok((contract_address, tx.data(), result))
+        Ok((contract_address, tx.data(), result, context))
     }
+}
+
+#[derive(Default)]
+pub struct CsalRunContext {
+    pub return_data: Bytes,
+    pub logs: Vec<Bytes>,
+    pub selfdestruct: Option<Bytes>,
+}
+
+impl<Mac: SupportMachine> RunContext<Mac> for CsalRunContext {
+    fn ecall(&mut self, machine: &mut Mac) -> Result<bool, VMError> {
+        let code = machine.registers()[A7].to_u64();
+        match code {
+            3075 => {
+                let data_address = machine.registers()[A0].to_u64();
+                let data_length = machine.registers()[A1].to_u32();
+                let data = load_data(machine, data_address, data_length)?;
+                self.return_data = data.into();
+                Ok(true)
+            }
+            3076 => {
+                let data_address = machine.registers()[A0].to_u64();
+                let data_length = machine.registers()[A1].to_u32();
+                let data = load_data(machine, data_address, data_length)?;
+                self.logs.push(data.into());
+                Ok(true)
+            }
+            3077 => {
+                let data_address = machine.registers()[A0].to_u64();
+                let data_length = machine.registers()[A1].to_u32();
+                let data = load_data(machine, data_address, data_length)?;
+                if self.selfdestruct.is_some() {
+                    panic!("selfdestruct twice");
+                }
+                self.selfdestruct = Some(data.into());
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+}
+
+fn load_data<Mac: SupportMachine>(
+    machine: &mut Mac,
+    address: u64,
+    length: u32,
+) -> Result<Vec<u8>, VMError> {
+    let mut data = vec![0u8; length as usize];
+    for (i, c) in data.iter_mut().enumerate() {
+        *c = machine
+            .memory_mut()
+            .load8(&Mac::REG::from_u64(address).overflowing_add(&Mac::REG::from_u64(i as u64)))?
+            .to_u8();
+    }
+    Ok(data)
 }
 
 fn print_proof(proof: &RunProofResult) {

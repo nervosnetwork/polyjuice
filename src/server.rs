@@ -1,10 +1,9 @@
-use crate::storage::{Loader, Runner};
+use crate::storage::{CsalRunContext, Loader, Runner};
 use crate::types::{
     parse_log, ContractAddress, ContractChange, ContractMeta, EoaAddress, RunConfig,
 };
 use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::{JsonBytes, Transaction};
-use ckb_simple_account_layer::RunResult;
 use ckb_types::{bytes::Bytes, H256};
 use jsonrpc_core::{Error, ErrorCode, Result as RpcResult};
 use jsonrpc_derive::rpc;
@@ -71,11 +70,11 @@ impl Rpc for RpcImpl {
     fn create(&self, sender: EoaAddress, code: JsonBytes) -> RpcResult<TransactionReceipt> {
         let loader = Loader::clone(&self.loader);
         let run_config = self.run_config.clone();
-        let (contract_address, tx, result) = Runner::new(loader, run_config)
+        let (contract_address, tx, result, context) = Runner::new(loader, run_config)
             .create(sender, code.into_bytes())
             .map_err(convert_err_box)?;
 
-        let logs = result
+        let logs = context
             .logs
             .into_iter()
             .map(|log_data| {
@@ -87,7 +86,7 @@ impl Rpc for RpcImpl {
         Ok(TransactionReceipt {
             tx: Transaction::from(tx),
             contract_address: Some(contract_address),
-            return_data: Some(JsonBytes::from_bytes(result.return_data)),
+            return_data: Some(JsonBytes::from_bytes(context.return_data)),
             logs,
         })
     }
@@ -100,11 +99,11 @@ impl Rpc for RpcImpl {
     ) -> RpcResult<TransactionReceipt> {
         let loader = Loader::clone(&self.loader);
         let run_config = self.run_config.clone();
-        let (tx, result) = Runner::new(loader, run_config)
+        let (tx, result, context) = Runner::new(loader, run_config)
             .call(sender, contract_address.clone(), input.into_bytes())
             .map_err(convert_err_box)?;
 
-        let logs = result
+        let logs = context
             .logs
             .into_iter()
             .map(|log_data| {
@@ -116,7 +115,7 @@ impl Rpc for RpcImpl {
         Ok(TransactionReceipt {
             tx: Transaction::from(tx),
             contract_address: None,
-            return_data: Some(JsonBytes::from_bytes(result.return_data)),
+            return_data: Some(JsonBytes::from_bytes(context.return_data)),
             logs,
         })
     }
@@ -129,10 +128,10 @@ impl Rpc for RpcImpl {
     ) -> RpcResult<StaticCallResponse> {
         let loader = Loader::clone(&self.loader);
         let run_config = self.run_config.clone();
-        let result = Runner::new(loader, run_config)
+        let (_result, context) = Runner::new(loader, run_config)
             .static_call(sender, contract_address.clone(), input.into_bytes())
             .map_err(convert_err_box)?;
-        StaticCallResponse::try_from((result, contract_address)).map_err(convert_err)
+        StaticCallResponse::try_from((context, contract_address)).map_err(convert_err)
     }
 
     fn get_code(&self, contract_address: ContractAddress) -> RpcResult<ContractCodeJson> {
@@ -308,14 +307,14 @@ pub struct StaticCallResponse {
     logs: Vec<LogEntry>,
 }
 
-impl TryFrom<(RunResult, ContractAddress)> for StaticCallResponse {
+impl TryFrom<(CsalRunContext, ContractAddress)> for StaticCallResponse {
     type Error = String;
     fn try_from(
-        (result, contract_address): (RunResult, ContractAddress),
+        (context, contract_address): (CsalRunContext, ContractAddress),
     ) -> Result<StaticCallResponse, String> {
         Ok(StaticCallResponse {
-            return_data: JsonBytes::from_bytes(result.return_data),
-            logs: result
+            return_data: JsonBytes::from_bytes(context.return_data),
+            logs: context
                 .logs
                 .into_iter()
                 .map(|log_data| {

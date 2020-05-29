@@ -1,5 +1,5 @@
 use ckb_hash::blake2b_256;
-use ckb_simple_account_layer::{CkbBlake2bHasher, Config, RunResult};
+use ckb_simple_account_layer::{CkbBlake2bHasher, Config};
 use ckb_types::{
     bytes::{BufMut, Bytes, BytesMut},
     core::{DepType, EpochNumberWithFraction, ScriptHashType},
@@ -13,7 +13,7 @@ use sparse_merkle_tree::{default_store::DefaultStore, SparseMerkleTree, H256 as 
 use std::collections::HashMap;
 use std::convert::TryFrom;
 
-use crate::storage::{value, Key};
+use crate::storage::{value, CsalRunContext, Key};
 
 pub const ONE_CKB: u64 = 100_000_000;
 pub const MIN_CELL_CAPACITY: u64 = 61 * ONE_CKB;
@@ -98,7 +98,7 @@ pub struct WitnessData {
     pub signature: Bytes,
     /// The ethereum program(transaction) to run.
     pub program: Program,
-    /// The return data
+    /// The return data (for read by other contract when contract call contract)
     pub return_data: Bytes,
     /// The call's selfdestruct target
     pub selfdestruct: Option<H160>,
@@ -392,9 +392,9 @@ impl WitnessData {
         }
     }
 
-    pub fn update_result(&mut self, result: &RunResult) -> Result<(), String> {
-        self.return_data = result.return_data.clone();
-        self.selfdestruct = result
+    pub fn update(&mut self, context: &CsalRunContext) -> Result<(), String> {
+        self.return_data = context.return_data.clone();
+        self.selfdestruct = context
             .selfdestruct
             .clone()
             .map(|target| H160::from_slice(target.as_ref()).map_err(|err| err.to_string()))

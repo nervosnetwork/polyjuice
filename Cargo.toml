@@ -25,9 +25,10 @@ jsonrpc-core = "14.0"
 jsonrpc-derive = "14.0"
 jsonrpc-server-utils = "14.0"
 jsonrpc-http-server = "14.0"
+ckb-vm = { version = "0.19.1", features = ["asm"] }
 sparse-merkle-tree = { git = "https://github.com/jjyr/sparse-merkle-tree", rev = "0e313cf" }
 ckb-hash = { git = "https://github.com/nervosnetwork/ckb", tag = "v0.31.0-pre1" }
 ckb-types = { git = "https://github.com/nervosnetwork/ckb", tag = "v0.31.0-pre1" }
 ckb-jsonrpc-types = { git = "https://github.com/nervosnetwork/ckb", tag = "v0.31.0-pre1" }
 # ckb-simple-account-layer = { git = "https://github.com/nervosnetwork/ckb-simple-account-layer", rev = "83f20d9" }
-ckb-simple-account-layer = { git = "https://github.com/TheWaWaR/ckb-simple-account-layer.git", rev = "14dfbc8" }
+ckb-simple-account-layer = { git = "https://github.com/TheWaWaR/ckb-simple-account-layer.git", rev = "0c4c142" }

@@ -21,6 +21,10 @@ contracts_binary = {
     SELF_DESTRUCT: "608060405260405161013c38038061013c833981810160405260208110156100275760006000fd5b81019080805190602001909291905050505b80600060006101000a81548173ffffffffffffffffffffffffffffffffffffffff021916908373ffffffffffffffffffffffffffffffffffffffff1602179055505b50610081565b60ad8061008f6000396000f3fe608060405234801560105760006000fd5b5060043610602c5760003560e01c8063ae8421e114603257602c565b60006000fd5b6038603a565b005b600060009054906101000a900473ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff16ff5b56fea2646970667358221220ead2c0723dcc5bc6fe1848ffcc748528c4f0638575fdee75e2c972c60fa1ea2d64736f6c63430006060033",
 }
 
+if len(sys.argv) < 4:
+    print("USAGE:\n    python {} <json-dir> <privkey-path> <ckb-binary-path>".format(sys.argv[0]))
+    exit(-1)
+
 target_dir = sys.argv[1]
 privkey_path = sys.argv[2]
 ckb_bin_path = sys.argv[3]
@@ -34,10 +38,10 @@ def send_jsonrpc(method, params):
         "params": params,
     }
     resp = requests.post(URL, json=payload).json()
-    if 'error' in resp:
-        print("JSONRPC ERROR: {}".format(resp['error']))
+    if "error" in resp:
+        print("JSONRPC ERROR: {}".format(resp["error"]))
         exit(-1)
-    return resp['result']
+    return resp["result"]
 
 def create_contract(binary, constructor_args=""):
     print("[create contract]:")
@@ -45,7 +49,7 @@ def create_contract(binary, constructor_args=""):
     print("  binary = {}".format(binary))
     print("    args = {}".format(constructor_args))
     result = send_jsonrpc("create", [SENDER, "0x{}{}".format(binary, constructor_args)])
-    print("  >> created address = {}".format(result['contract_address']))
+    print("  >> created address = {}".format(result["contract_address"]))
     return result
 
 def call_contract(contract_address, args, is_static=False):
@@ -57,24 +61,24 @@ def call_contract(contract_address, args, is_static=False):
     return send_jsonrpc(method, [SENDER, contract_address, args])
 
 def run_cmd(cmd):
-    print('[RUN]: {}'.format(cmd))
-    output = subprocess.check_output(cmd, shell=True).strip().decode('utf-8')
-    print('[Output]: {}'.format(output))
+    print("[RUN]: {}".format(cmd))
+    output = subprocess.check_output(cmd, shell=True).strip().decode("utf-8")
+    print("[Output]: {}".format(output))
 
 def commit_tx(result, action_name):
-    result_path = os.path.join(target_dir, '{}.json'.format(action_name))
-    with open(result_path, 'w') as f:
+    result_path = os.path.join(target_dir, "{}.json".format(action_name))
+    with open(result_path, "w") as f:
         json.dump(result, f, indent=4)
-    tx_path = os.path.join(target_dir, '{}-tx.json'.format(action_name))
-    run_cmd('polyjuice-ng sign-tx -k {} -t {} -o {}'.format(privkey_path, result_path, tx_path))
-    run_cmd('ckb-cli tx send --tx-file {} --skip-check'.format(tx_path))
-    run_cmd('{} miner -C {} -l 5'.format(ckb_bin_path, ckb_dir))
+    tx_path = os.path.join(target_dir, "{}-tx.json".format(action_name))
+    run_cmd("polyjuice-ng sign-tx -k {} -t {} -o {}".format(privkey_path, result_path, tx_path))
+    run_cmd("ckb-cli tx send --tx-file {} --skip-check".format(tx_path))
+    run_cmd("{} miner -C {} -l 5".format(ckb_bin_path, ckb_dir))
 
 def create_contract_by_name(name, constructor_args=""):
     result = create_contract(contracts_binary[name], constructor_args)
     action_name = "create-{}".format(name)
     commit_tx(result, action_name)
-    return result['contract_address']
+    return result["contract_address"]
 
 
 def test_simple_storage():
@@ -117,5 +121,5 @@ def main():
     test_log_events()
     test_self_destruct()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

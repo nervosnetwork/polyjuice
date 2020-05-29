@@ -433,7 +433,7 @@ dependencies = [
 [[package]]
 name = "ckb-simple-account-layer"
 version = "0.1.0"
-source = "git+https://github.com/TheWaWaR/ckb-simple-account-layer.git?rev=14dfbc8#14dfbc82643e20108c57a14ba6c88736c97a50be"
+source = "git+https://github.com/TheWaWaR/ckb-simple-account-layer.git?rev=0c4c142#0c4c142e7978350fa82c61aee1cae8746f2f866b"
 dependencies = [
  "blake2b-rs",
  "bytes 0.5.4",
@@ -1720,6 +1720,7 @@ dependencies = [
  "ckb-jsonrpc-types",
  "ckb-simple-account-layer",
  "ckb-types",
+ "ckb-vm",
  "clap",
  "ctrlc",
  "env_logger 0.7.1",

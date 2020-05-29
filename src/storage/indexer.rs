@@ -1,7 +1,7 @@
 use bincode::serialize;
 use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::ScriptHashType;
-use ckb_simple_account_layer::{run, CkbBlake2bHasher, Config};
+use ckb_simple_account_layer::{run_with_context, CkbBlake2bHasher, Config};
 use ckb_types::{bytes::Bytes, core, packed, prelude::*, H256};
 use rocksdb::{WriteBatch, DB};
 use sparse_merkle_tree::{default_store::DefaultStore, SparseMerkleTree, H256 as SmtH256};
@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 
-use super::{db_get, value, Key, Loader};
+use super::{db_get, value, CsalRunContext, Key, Loader};
 use crate::client::HttpRpcClient;
 use crate::types::{
     h256_to_smth256, parse_log, smth256_to_h256, ContractAddress, ContractChange, ContractMeta,
@@ -455,9 +455,10 @@ impl Indexer {
                         .load_latest_contract_change(address.clone(), None, false, true)?
                         .merkle_tree();
                     let config: Config = (&self.run_config).into();
-                    let result =
-                        run(&config, &tree, &program_data).map_err(|err| err.to_string())?;
-                    if result.selfdestruct.is_none() {
+                    let mut context = CsalRunContext::default();
+                    let result = run_with_context(&config, &tree, &program_data, &mut context)
+                        .map_err(|err| err.to_string())?;
+                    if context.selfdestruct.is_none() {
                         panic!("Not a selfdestruct call: tx_hash={:x}", tx_hash);
                     }
                     let sender = witness_data.recover_sender(&tx_hash)?;
@@ -663,7 +664,9 @@ fn generate_change(
     };
 
     let config: Config = run_config.into();
-    let result = run(&config, &tree, &program_data).map_err(|err| err.to_string())?;
+    let mut context = CsalRunContext::default();
+    let result = run_with_context(&config, &tree, &program_data, &mut context)
+        .map_err(|err| err.to_string())?;
     result.commit(&mut tree).unwrap();
     let new_root_hash: [u8; 32] = (*tree.root()).into();
     if new_root_hash[..] != output_data[0..32] {
@@ -680,7 +683,7 @@ fn generate_change(
 
     let sender = witness_data.recover_sender(tx_hash)?;
     assert_eq!(sender, witness_data.program.sender);
-    let logs = result
+    let logs = context
         .logs
         .into_iter()
         .map(|log_data| parse_log(log_data.as_ref()))
