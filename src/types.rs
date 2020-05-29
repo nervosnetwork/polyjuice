@@ -412,9 +412,10 @@ impl WitnessData {
     }
 
     pub fn program_data(&self) -> Bytes {
-        let mut buf = BytesMut::from(&self.signature[..]);
+        let mut buf = BytesMut::default();
         let program = self.program.serialize();
         log::trace!("program: {}", hex::encode(program.as_ref()));
+        buf.put(self.signature.as_ref());
         buf.put(&(program.len() as u32).to_le_bytes()[..]);
         buf.put(program.as_ref());
         buf.put(&(self.return_data.len() as u32).to_le_bytes()[..]);
@@ -426,7 +427,8 @@ impl WitnessData {
     /// unsigned_data = tx_hash ++ program.len() ++ program ++ run_proof
     pub fn unsigned_data(&self, tx_hash: &H256) -> Bytes {
         let mut program_data = self.program_data();
-        let mut data = BytesMut::from(tx_hash.as_bytes());
+        let mut data = BytesMut::default();
+        data.put(tx_hash.as_bytes());
         data.put(&(program_data.len() as u32).to_le_bytes()[..]);
         data.put(&[0u8; 65][..]);
         data.put(&program_data.as_ref()[65..]);

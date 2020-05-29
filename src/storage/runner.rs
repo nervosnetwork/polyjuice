@@ -156,7 +156,8 @@ impl Runner {
                 .build();
             (output, Bytes::default())
         } else {
-            let mut output_data = BytesMut::from(root_hash.as_slice());
+            let mut output_data = BytesMut::default();
+            output_data.put(root_hash.as_slice());
             output_data.put(&code_hash[..]);
             (contract_live_cell, output_data.freeze())
         };
@@ -277,11 +278,12 @@ impl Runner {
             .lock(contract_lock_script)
             .capacity(output_capacity.pack())
             .build();
-        let mut output_data = BytesMut::from(root_hash.as_slice());
+        let mut output_data = BytesMut::default();
         let code_hash = blake2b_256(context.return_data.as_ref());
+        output_data.put(root_hash.as_slice());
+        output_data.put(&code_hash[..]);
         log::debug!("code: {}", hex::encode(context.return_data.as_ref()));
         log::debug!("code hash: {}", hex::encode(&code_hash[..]));
-        output_data.put(&code_hash[..]);
 
         let mut transaction_builder = TransactionBuilder::default()
             .cell_dep(SIGHASH_CELL_DEP.clone())
