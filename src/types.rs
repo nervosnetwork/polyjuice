@@ -134,6 +134,8 @@ pub struct Program {
     /// The call depth.
     pub depth: u32,
 
+    /// The transaction origin address (TODO: EoA sender address?)
+    pub tx_origin: EoaAddress,
     /// The sender of the message. (MUST be verified by the signature in witness data)
     pub sender: EoaAddress,
     /// The destination of the message (MUST be verified by the script args).
@@ -286,11 +288,12 @@ impl TryFrom<&[u8]> for WitnessData {
 }
 
 impl Program {
-    pub fn new_create(sender: EoaAddress, code: Bytes) -> Program {
+    pub fn new_create(tx_origin: EoaAddress, sender: EoaAddress, code: Bytes) -> Program {
         Program {
             kind: CallKind::CREATE,
             flags: 0,
             depth: 0,
+            tx_origin,
             sender,
             destination: ContractAddress::default(),
             code,
@@ -299,6 +302,7 @@ impl Program {
     }
 
     pub fn new_call(
+        tx_origin: EoaAddress,
         sender: EoaAddress,
         destination: ContractAddress,
         code: Bytes,
@@ -310,6 +314,7 @@ impl Program {
             kind: CallKind::CALL,
             flags,
             depth: 0,
+            tx_origin,
             sender,
             destination,
             code,
@@ -317,11 +322,16 @@ impl Program {
         }
     }
 
+    pub fn is_create(&self) -> bool {
+        self.kind == CallKind::CREATE
+    }
+
     pub fn serialize(&self) -> Bytes {
         let mut buf = BytesMut::default();
         buf.put(&[self.kind as u8][..]);
         buf.put(&self.flags.to_le_bytes()[..]);
         buf.put(&self.depth.to_le_bytes()[..]);
+        buf.put(self.tx_origin.0.as_bytes());
         buf.put(self.sender.0.as_bytes());
         buf.put(self.destination.0.as_bytes());
 
@@ -348,6 +358,7 @@ impl TryFrom<&[u8]> for Program {
         let mut offset: usize = 1;
         let flags = load_u32(data, &mut offset)?;
         let depth = load_u32(data, &mut offset)?;
+        let tx_origin = EoaAddress(load_h160(data, &mut offset)?);
         let sender = EoaAddress(load_h160(data, &mut offset)?);
         let destination = ContractAddress(load_h160(data, &mut offset)?);
         let code = load_var_slice(data, &mut offset)?;
@@ -359,6 +370,7 @@ impl TryFrom<&[u8]> for Program {
             kind,
             flags,
             depth,
+            tx_origin,
             sender,
             destination,
             code: Bytes::from(code.to_vec()),
@@ -393,8 +405,12 @@ impl WitnessData {
     }
 
     pub fn update(&mut self, context: &CsalRunContext) -> Result<(), String> {
-        self.return_data = context.return_data.clone();
+        self.return_data = context
+            .current_contract_info()
+            .current_return_data()
+            .clone();
         self.selfdestruct = context
+            .current_contract_info()
             .selfdestruct
             .clone()
             .map(|target| H160::from_slice(target.as_ref()).map_err(|err| err.to_string()))
@@ -639,7 +655,11 @@ mod test {
 
     #[test]
     fn test_serde_program() {
-        let program1 = Program::new_create(Default::default(), Bytes::from("abcdef"));
+        let program1 = Program::new_create(
+            Default::default(),
+            Default::default(),
+            Bytes::from("abcdef"),
+        );
         let binary = program1.serialize();
         let program2 = Program::try_from(binary.as_ref()).unwrap();
         assert_eq!(program1, program2);
@@ -654,7 +674,11 @@ mod test {
         let run_proof_data = run_proof.serialize_pure().unwrap();
         let witness_data1 = WitnessData {
             signature: Bytes::from([1u8; 65].to_vec()),
-            program: Program::new_create(Default::default(), Bytes::from("abcdef")),
+            program: Program::new_create(
+                Default::default(),
+                Default::default(),
+                Bytes::from("abcdef"),
+            ),
             return_data: Bytes::from("return data"),
             selfdestruct: None,
             run_proof: Bytes::from(run_proof_data),

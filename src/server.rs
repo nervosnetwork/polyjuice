@@ -75,8 +75,9 @@ impl Rpc for RpcImpl {
             .map_err(convert_err_box)?;
 
         let logs = context
-            .logs
-            .into_iter()
+            .current_contract_info()
+            .current_logs()
+            .iter()
             .map(|log_data| {
                 parse_log(log_data.as_ref())
                     .map(|(topics, data)| LogEntry::new(contract_address.clone(), topics, data))
@@ -86,7 +87,12 @@ impl Rpc for RpcImpl {
         Ok(TransactionReceipt {
             tx: Transaction::from(tx),
             contract_address: Some(contract_address),
-            return_data: Some(JsonBytes::from_bytes(context.return_data)),
+            return_data: Some(JsonBytes::from_bytes(
+                context
+                    .current_contract_info()
+                    .current_return_data()
+                    .clone(),
+            )),
             logs,
         })
     }
@@ -104,8 +110,9 @@ impl Rpc for RpcImpl {
             .map_err(convert_err_box)?;
 
         let logs = context
-            .logs
-            .into_iter()
+            .current_contract_info()
+            .current_logs()
+            .iter()
             .map(|log_data| {
                 parse_log(log_data.as_ref())
                     .map(|(topics, data)| LogEntry::new(contract_address.clone(), topics, data))
@@ -115,7 +122,12 @@ impl Rpc for RpcImpl {
         Ok(TransactionReceipt {
             tx: Transaction::from(tx),
             contract_address: None,
-            return_data: Some(JsonBytes::from_bytes(context.return_data)),
+            return_data: Some(JsonBytes::from_bytes(
+                context
+                    .current_contract_info()
+                    .current_return_data()
+                    .clone(),
+            )),
             logs,
         })
     }
@@ -313,10 +325,16 @@ impl TryFrom<(CsalRunContext, ContractAddress)> for StaticCallResponse {
         (context, contract_address): (CsalRunContext, ContractAddress),
     ) -> Result<StaticCallResponse, String> {
         Ok(StaticCallResponse {
-            return_data: JsonBytes::from_bytes(context.return_data),
+            return_data: JsonBytes::from_bytes(
+                context
+                    .current_contract_info()
+                    .current_return_data()
+                    .clone(),
+            ),
             logs: context
-                .logs
-                .into_iter()
+                .current_contract_info()
+                .current_logs()
+                .iter()
                 .map(|log_data| {
                     parse_log(log_data.as_ref())
                         .map(|(topics, data)| LogEntry::new(contract_address.clone(), topics, data))

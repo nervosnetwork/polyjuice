@@ -1,7 +1,7 @@
 use bincode::serialize;
 use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::ScriptHashType;
-use ckb_simple_account_layer::{run_with_context, CkbBlake2bHasher, Config};
+use ckb_simple_account_layer::{CkbBlake2bHasher, Config};
 use ckb_types::{bytes::Bytes, core, packed, prelude::*, H256};
 use rocksdb::{WriteBatch, DB};
 use sparse_merkle_tree::{default_store::DefaultStore, SparseMerkleTree, H256 as SmtH256};
@@ -221,6 +221,7 @@ impl Indexer {
                 > = HashMap::default();
                 let mut contract_outputs: HashMap<usize, (ContractAddress, Bytes)> =
                     HashMap::default();
+                let mut first_cell_input = packed::CellInput::default();
 
                 for (input_index, input) in tx.inputs.into_iter().enumerate() {
                     // Information from input
@@ -230,6 +231,10 @@ impl Indexer {
                     if input.previous_output.tx_hash == H256::default() {
                         continue;
                     }
+                    if input_index == 0 {
+                        first_cell_input = packed::CellInput::from(input.clone());
+                    }
+
                     let prev_tx = self
                         .client
                         .get_transaction(input.previous_output.tx_hash.clone())?
@@ -383,6 +388,7 @@ impl Indexer {
                             witness.as_bytes(),
                             output_data,
                             contract_inputs.remove(address),
+                            first_cell_input.clone(),
                             is_create,
                         ) {
                             Ok((sender, new_storage, logs, code)) => {
@@ -431,6 +437,7 @@ impl Indexer {
                 }
 
                 // The result inputs are selfdestruct contract call
+                // FIXME: one transaction can have only one root contract
                 for (address, (old_storage, data, input_index)) in contract_inputs {
                     let witness = tx.witnesses[input_index].as_bytes();
                     let witness_data = packed::WitnessArgs::from_slice(witness)
@@ -455,10 +462,12 @@ impl Indexer {
                         .load_latest_contract_change(address.clone(), None, false, true)?
                         .merkle_tree();
                     let config: Config = (&self.run_config).into();
-                    let mut context = CsalRunContext::default();
-                    let result = run_with_context(&config, &tree, &program_data, &mut context)
+                    // FIXME: one transaction can have only one root contract
+                    let mut context = CsalRunContext::new(config, first_cell_input.clone());
+                    let result = context
+                        .run(tree, witness_data.program.clone())
                         .map_err(|err| err.to_string())?;
-                    if context.selfdestruct.is_none() {
+                    if context.current_contract_info().selfdestruct.is_none() {
                         panic!("Not a selfdestruct call: tx_hash={:x}", tx_hash);
                     }
                     let sender = witness_data.recover_sender(&tx_hash)?;
@@ -595,6 +604,7 @@ fn generate_change(
     witness: &[u8],
     output_data: &Bytes,
     input: Option<(HashMap<H256, H256>, Bytes, usize)>,
+    first_cell_input: packed::CellInput,
     is_create: bool,
 ) -> Result<
     (
@@ -664,8 +674,10 @@ fn generate_change(
     };
 
     let config: Config = run_config.into();
-    let mut context = CsalRunContext::default();
-    let result = run_with_context(&config, &tree, &program_data, &mut context)
+    let mut context = CsalRunContext::new(config, first_cell_input);
+    let new_tree = SparseMerkleTree::new(*tree.root(), tree.store().clone());
+    let result = context
+        .run(new_tree, witness_data.program.clone())
         .map_err(|err| err.to_string())?;
     result.commit(&mut tree).unwrap();
     let new_root_hash: [u8; 32] = (*tree.root()).into();
@@ -684,8 +696,9 @@ fn generate_change(
     let sender = witness_data.recover_sender(tx_hash)?;
     assert_eq!(sender, witness_data.program.sender);
     let logs = context
-        .logs
-        .into_iter()
+        .current_contract_info()
+        .current_logs()
+        .iter()
         .map(|log_data| parse_log(log_data.as_ref()))
         .collect::<Result<Vec<_>, String>>()?;
     Ok((sender, new_storage, logs, code))

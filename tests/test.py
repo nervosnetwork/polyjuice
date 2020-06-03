@@ -12,6 +12,7 @@ URL = "http://localhost:8214"
 SENDER1 = "0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7"
 SENDER1_PRIVKEY = "d00c06bfd800d27397002dca6fb0993d5ba6399b4238b2f29ee9deb97593d2bc"
 SENDER2 = "0x89750ca24e601604336276291d8b70280804d783"
+ADDRESS2 = "ckt1qyqgjagv5f8xq9syxd38v2ga3dczszqy67psu2y8r4"
 SENDER2_PRIVKEY = "3066aa42bfa95c6d033edfad9d1efb871991fd26f56270fedc171559823bee77"
 target_dir = sys.argv[1]
 ckb_bin_path = sys.argv[3]
@@ -80,6 +81,9 @@ def run_cmd(cmd):
     output = subprocess.check_output(cmd, shell=True).strip().decode("utf-8")
     print("[Output]: {}".format(output))
 
+def mine_blocks(n=5):
+    run_cmd("{} miner -C {} -l {}".format(ckb_bin_path, ckb_dir, n))
+
 def commit_tx(result, action_name, privkey_path=privkey1_path):
     result_path = os.path.join(target_dir, "{}.json".format(action_name))
     with open(result_path, "w") as f:
@@ -87,7 +91,7 @@ def commit_tx(result, action_name, privkey_path=privkey1_path):
     tx_path = os.path.join(target_dir, "{}-tx.json".format(action_name))
     run_cmd("polyjuice-ng sign-tx -k {} -t {} -o {}".format(privkey_path, result_path, tx_path))
     run_cmd("ckb-cli tx send --tx-file {} --skip-check".format(tx_path))
-    run_cmd("{} miner -C {} -l 5".format(ckb_bin_path, ckb_dir))
+    mine_blocks()
 
 def create_contract_by_name(name, constructor_args=""):
     result = create_contract(contracts_binary[name], constructor_args)
@@ -168,6 +172,9 @@ def test_erc20():
             action_name = "call-{}-{}-{}".format(contract_name, contract_address, args)
             commit_tx(result, action_name)
 
+    cmd = "ckb-cli --wait-for-sync wallet transfer --privkey-path {} --to-address {} --capacity 500 --tx-fee 0.001".format(privkey1_path, ADDRESS2)
+    run_cmd(cmd)
+    mine_blocks()
     # transferFrom(89750ca24e601604336276291d8b70280804d783, d4c85f3cb8a625d25febb5acdade5e5bf4824fda, 0x3e8)
     args = "0x23b872dd000000000000000000000000c8328aabcd9b9e8e64fbc566c4385c3bdeb219d7000000000000000000000000d4c85f3cb8a625d25febb5acdade5e5bf4824fda00000000000000000000000000000000000000000000000000000000000003e8"
     result = call_contract(contract_address, args, is_static, sender=SENDER2)
