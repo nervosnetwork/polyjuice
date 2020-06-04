@@ -307,8 +307,8 @@ impl TryFrom<&[u8]> for Key {
 
 pub mod value {
     use super::BlockNumber;
-    use crate::types::{ContractAddress, EoaAddress};
-    use ckb_types::{bytes::Bytes, packed, prelude::*, H256};
+    use crate::types::ContractAddress;
+    use ckb_types::{bytes::Bytes, packed, prelude::*, H160, H256};
     use serde::{Deserialize, Serialize};
 
     /// Deserialize/Serialize use bincode
@@ -324,7 +324,7 @@ pub mod value {
     #[derive(Debug, Clone, Deserialize, Serialize)]
     pub struct ContractChange {
         pub tx_hash: H256,
-        pub sender: EoaAddress,
+        pub sender: H160,
         pub new_storage: Vec<(H256, H256)>,
         pub is_create: bool,
     }

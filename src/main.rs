@@ -333,9 +333,7 @@ fn main() -> Result<(), String> {
                 .unwrap();
             let flags: u32 = if m.is_present("static") { 1 } else { 0 };
             let depth: u32 = m.value_of("depth").unwrap().parse::<u32>().unwrap();
-            let sender = parse_h160(m.value_of("sender").unwrap())
-                .map(EoaAddress)
-                .unwrap();
+            let sender = parse_h160(m.value_of("sender").unwrap()).unwrap();
             let destination = parse_h160(m.value_of("destination").unwrap())
                 .map(ContractAddress)
                 .unwrap();
@@ -349,7 +347,7 @@ fn main() -> Result<(), String> {
                 kind,
                 flags,
                 depth,
-                tx_origin: sender.clone(),
+                tx_origin: EoaAddress(sender.clone()),
                 sender,
                 destination,
                 code,

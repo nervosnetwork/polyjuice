@@ -9,18 +9,19 @@ use ckb_types::{
         BytesOpt, CellInput, CellOutput, OutPoint, Script, ScriptOpt, Transaction, WitnessArgs,
     },
     prelude::*,
-    H160,
+    H160, H256,
 };
 use ckb_vm::{
     registers::{A0, A1, A7},
     Error as VMError, Memory, Register, SupportMachine,
 };
 use sparse_merkle_tree::{default_store::DefaultStore, SparseMerkleTree, H256 as SmtH256};
+use std::convert::TryFrom;
 use std::error::Error as StdError;
 
 use super::Loader;
 use crate::types::{
-    ContractAddress, EoaAddress, Program, RunConfig, WitnessData, ALWAYS_SUCCESS_SCRIPT,
+    CallKind, ContractAddress, EoaAddress, Program, RunConfig, WitnessData, ALWAYS_SUCCESS_SCRIPT,
     MIN_CELL_CAPACITY, ONE_CKB, SIGHASH_CELL_DEP, SIGHASH_TYPE_HASH,
 };
 
@@ -36,7 +37,7 @@ impl Runner {
 
     pub fn static_call(
         &mut self,
-        sender: EoaAddress,
+        sender: H160,
         destination: ContractAddress,
         input: Bytes,
     ) -> Result<(RunResult, CsalRunContext), Box<dyn StdError>> {
@@ -49,7 +50,14 @@ impl Runner {
         let latest_change =
             self.loader
                 .load_latest_contract_change(destination.clone(), None, false, false)?;
-        let program = Program::new_call(sender.clone(), sender, destination, code, input, false);
+        let program = Program::new_call(
+            EoaAddress(sender.clone()),
+            sender,
+            destination,
+            code,
+            input,
+            false,
+        );
 
         let latest_tree = latest_change.merkle_tree();
         let mut witness_data = WitnessData::new(program);
@@ -61,9 +69,9 @@ impl Runner {
             hex::encode(&(program_data.len() as u32).to_le_bytes()[..])
         );
         log::debug!("[binary]: {}", hex::encode(program_data.as_ref()));
-        let mut context = CsalRunContext::new(config, CellInput::default());
+        let mut context = CsalRunContext::new(self.loader.clone(), config, CellInput::default());
         let new_tree = SparseMerkleTree::new(*latest_tree.root(), latest_tree.store().clone());
-        let result = match context.run(new_tree, witness_data.program) {
+        let result = match context.run(witness_data.program, Some(new_tree)) {
             Ok(result) => {
                 let new_root_hash = result.committed_root_hash(&latest_tree)?;
                 if &new_root_hash != latest_tree.root() {
@@ -82,7 +90,7 @@ impl Runner {
 
     pub fn call(
         &mut self,
-        sender: EoaAddress,
+        sender: H160,
         destination: ContractAddress,
         input: Bytes,
     ) -> Result<(Transaction, RunResult, CsalRunContext), Box<dyn StdError>> {
@@ -101,12 +109,20 @@ impl Runner {
         let latest_root_hash = &latest_contract_data.as_ref()[0..32];
         let latest_code_hash = &latest_contract_data.as_ref()[32..];
         assert_eq!(&code_hash[..], latest_code_hash, "code hash not match");
-        let program = Program::new_call(sender.clone(), sender, destination, code, input, false);
+        let program = Program::new_call(
+            EoaAddress(sender.clone()),
+            sender,
+            destination,
+            code,
+            input,
+            false,
+        );
 
         let tx_fee = ONE_CKB;
-        let (mut live_cells, total_capacity) = self
-            .loader
-            .collect_cells(program.sender.clone(), tx_fee + MIN_CELL_CAPACITY)?;
+        let (mut live_cells, total_capacity) = self.loader.collect_cells(
+            EoaAddress(program.sender.clone()),
+            tx_fee + MIN_CELL_CAPACITY,
+        )?;
         let out_point = OutPoint::new(latest_change.tx_hash.pack(), latest_change.output_index);
         // Should add to the head of inputs
         live_cells.insert(0, out_point);
@@ -126,9 +142,9 @@ impl Runner {
         );
         log::debug!("[binary]: {}", hex::encode(program_data.as_ref()));
         let config: Config = (&self.run_config).into();
-        let mut context = CsalRunContext::new(config, inputs[0].clone());
+        let mut context = CsalRunContext::new(self.loader.clone(), config, inputs[0].clone());
         let new_tree = SparseMerkleTree::new(*latest_tree.root(), latest_tree.store().clone());
-        let result = match context.run(new_tree, program.clone()) {
+        let result = match context.run(program.clone(), Some(new_tree)) {
             Ok(result) => result,
             Err(err) => {
                 log::warn!("Error: {:?}", err);
@@ -186,7 +202,7 @@ impl Runner {
 
         let capacity_left = total_capacity - tx_fee;
         if capacity_left >= MIN_CELL_CAPACITY {
-            let sender_args = Bytes::from(program.sender.0.as_bytes().to_vec());
+            let sender_args = Bytes::from(program.sender.as_bytes().to_vec());
             let output = CellOutput::new_builder()
                 .lock(
                     Script::new_builder()
@@ -208,10 +224,10 @@ impl Runner {
 
     pub fn create(
         &mut self,
-        sender: EoaAddress,
+        sender: H160,
         code: Bytes,
     ) -> Result<(ContractAddress, Transaction, RunResult, CsalRunContext), Box<dyn StdError>> {
-        let program = Program::new_create(sender.clone(), sender, code);
+        let program = Program::new_create(EoaAddress(sender.clone()), sender, code);
 
         // TODO: let user choose the lock
         let contract_lock_script = ALWAYS_SUCCESS_SCRIPT.clone();
@@ -220,7 +236,7 @@ impl Runner {
         let output_capacity = 200 * ONE_CKB;
         let (live_cells, total_capacity) = self
             .loader
-            .collect_cells(program.sender.clone(), tx_fee + output_capacity)?;
+            .collect_cells(EoaAddress(program.sender.clone()), tx_fee + output_capacity)?;
         let inputs = live_cells
             .into_iter()
             .map(|out_point| CellInput::new(out_point, 0))
@@ -236,9 +252,9 @@ impl Runner {
         );
         log::debug!("[binary]: {}", hex::encode(program_data.as_ref()));
         let config: Config = (&self.run_config).into();
-        let mut context = CsalRunContext::new(config, inputs[0].clone());
+        let mut context = CsalRunContext::new(self.loader.clone(), config, inputs[0].clone());
         let new_tree = SparseMerkleTree::new(*latest_tree.root(), latest_tree.store().clone());
-        let result = match context.run(new_tree, program.clone()) {
+        let result = match context.run(program.clone(), Some(new_tree)) {
             Ok(result) => result,
             Err(err) => {
                 log::warn!("Error: {:?}", err);
@@ -319,7 +335,7 @@ impl Runner {
 
         let capacity_left = total_capacity - tx_fee - output_capacity;
         if capacity_left >= MIN_CELL_CAPACITY {
-            let sender_args = Bytes::from(program.sender.0.as_bytes().to_vec());
+            let sender_args = Bytes::from(program.sender.as_bytes().to_vec());
             let output = CellOutput::new_builder()
                 .lock(
                     Script::new_builder()
@@ -340,6 +356,7 @@ impl Runner {
 }
 
 pub struct CsalRunContext {
+    pub loader: Loader,
     pub config: Config,
     // The transaction origin address
     pub tx_origin: EoaAddress,
@@ -351,54 +368,85 @@ pub struct CsalRunContext {
 
 pub struct ContractInfo {
     pub tree: SparseMerkleTree<CkbBlake2bHasher, SmtH256, DefaultStore<SmtH256>>,
-    output_index: u64,
-    call_index: usize,
-    // (program, logs, return_data)
-    call_records: Vec<(Program, Vec<Bytes>, Bytes)>,
+    pub code: Bytes,
     pub selfdestruct: Option<Bytes>,
+    call_index: usize,
+    // (program, logs, return_data, run_proof)
+    call_records: Vec<CallRecord>,
+}
+
+pub struct CallRecord {
+    // Initial set
+    pub program: Program,
+    // Update in syscall
+    pub logs: Vec<Bytes>,
+    // Update in syscall
+    pub return_data: Bytes,
+    // Update after run_with_context
+    pub run_proof: Bytes,
+}
+
+impl CallRecord {
+    pub fn new(program: Program) -> CallRecord {
+        CallRecord {
+            program,
+            logs: Vec::new(),
+            return_data: Bytes::default(),
+            run_proof: Bytes::default(),
+        }
+    }
 }
 
 impl ContractInfo {
     pub fn new(
         tree: SparseMerkleTree<CkbBlake2bHasher, SmtH256, DefaultStore<SmtH256>>,
-        output_index: u64,
     ) -> ContractInfo {
         ContractInfo {
             tree,
-            output_index,
+            code: Bytes::default(),
             call_index: 0,
             call_records: Vec::new(),
             selfdestruct: None,
         }
     }
 
+    pub fn is_create(&self) -> bool {
+        self.call_records[0].program.is_create()
+    }
+
+    pub fn add_record(&mut self, program: Program) {
+        if !program.is_create() && self.code.is_empty() {
+            self.code = program.code.clone();
+        }
+        self.call_index = self.call_records.len();
+        self.call_records.push(CallRecord::new(program));
+    }
+
     pub fn current_program(&self) -> &Program {
-        &self.current_record().0
+        &self.current_record().program
     }
     pub fn current_logs(&self) -> &Vec<Bytes> {
-        &self.current_record().1
+        &self.current_record().logs
     }
     pub fn current_return_data(&self) -> &Bytes {
-        &self.current_record().2
+        &self.current_record().return_data
     }
-    pub fn current_record(&self) -> &(Program, Vec<Bytes>, Bytes) {
+    pub fn current_run_proof(&self) -> &Bytes {
+        &self.current_record().run_proof
+    }
+    pub fn current_record(&self) -> &CallRecord {
         &self.call_records[self.call_index]
     }
 
-    pub fn current_logs_mut(&mut self) -> &mut Vec<Bytes> {
-        &mut self.current_record_mut().1
-    }
-    pub fn current_return_data_mut(&mut self) -> &mut Bytes {
-        &mut self.current_record_mut().2
-    }
-    pub fn current_record_mut(&mut self) -> &mut (Program, Vec<Bytes>, Bytes) {
+    pub fn current_record_mut(&mut self) -> &mut CallRecord {
         &mut self.call_records[self.call_index]
     }
 }
 
 impl CsalRunContext {
-    pub fn new(config: Config, first_cell_input: CellInput) -> CsalRunContext {
+    pub fn new(loader: Loader, config: Config, first_cell_input: CellInput) -> CsalRunContext {
         CsalRunContext {
+            loader,
             config,
             tx_origin: Default::default(),
             first_cell_input,
@@ -427,19 +475,88 @@ impl CsalRunContext {
 
     pub fn run(
         &mut self,
-        tree: SparseMerkleTree<CkbBlake2bHasher, SmtH256, DefaultStore<SmtH256>>,
-        program: Program,
+        mut program: Program,
+        tree_opt: Option<SparseMerkleTree<CkbBlake2bHasher, SmtH256, DefaultStore<SmtH256>>>,
     ) -> Result<RunResult, Box<dyn StdError>> {
-        let output_index: u64 = 0;
-        let new_tree = SparseMerkleTree::new(*tree.root(), tree.store().clone());
-        let info = ContractInfo::new(tree, output_index);
-        self.tx_origin = program.sender.clone();
-        self.contract_index = 0;
-        self.contracts
-            .push((self.destination(&program, output_index), info));
+        let tree = if let Some(tree) = tree_opt {
+            tree
+        } else if program.is_create() {
+            SparseMerkleTree::default()
+        } else {
+            self.get_contract_info(&program.destination)
+                .map(|info| {
+                    Ok(SparseMerkleTree::new(
+                        *info.tree.root(),
+                        info.tree.store().clone(),
+                    ))
+                })
+                .unwrap_or_else(|| {
+                    self.loader
+                        .load_latest_contract_change(
+                            program.destination.clone(),
+                            None,
+                            false,
+                            false,
+                        )
+                        .map(|change| change.merkle_tree())
+                })?
+        };
+        let mut new_tree = SparseMerkleTree::new(*tree.root(), tree.store().clone());
+        self.tx_origin = EoaAddress(program.sender.clone());
+        let destination = self.destination(&program, self.contracts.len() as u64);
+
+        if let Some(contract_index) = self.get_contract_index(&destination) {
+            self.contract_index = contract_index;
+            let info = &mut self.contracts[contract_index].1;
+            info.add_record(program.clone());
+        } else {
+            self.contract_index = self.contracts.len();
+            let mut info = ContractInfo::new(tree);
+            info.add_record(program.clone());
+            self.contracts.push((destination, info));
+        }
+
         let witness_data = WitnessData::new(program);
         let config = self.config.clone();
-        run_with_context(&config, &new_tree, &witness_data.program_data(), self)
+        let result = match run_with_context(&config, &new_tree, &witness_data.program_data(), self)
+        {
+            Ok(result) => result,
+            Err(err) => {
+                log::warn!("Error: {:?}", err);
+                return Err(err);
+            }
+        };
+        let current_info = self.current_contract_info_mut();
+        // Update storage tree
+        let proof = result.generate_proof(&new_tree)?;
+        print_proof(&proof);
+        result.commit(&mut new_tree).unwrap();
+        current_info.tree = new_tree;
+        // Update run_proof
+        current_info.current_record_mut().run_proof = Bytes::from(proof.serialize_pure().unwrap());
+
+        Ok(result)
+    }
+
+    pub fn created_contracts(&self) -> Vec<(usize, ContractAddress)> {
+        self.contracts
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, program))| program.is_create())
+            .map(|(idx, (addr, _))| (idx, addr.clone()))
+            .collect()
+    }
+
+    pub fn get_contract_code(&self, address: &ContractAddress) -> Result<Bytes, String> {
+        self.get_contract_info(address)
+            .map(|info| info.code.clone())
+            .filter(|code| !code.is_empty())
+            .map(Ok)
+            .unwrap_or_else(|| {
+                self.loader
+                    .load_contract_meta(address.clone())
+                    .map(|meta| meta.code)
+            })
     }
 
     pub fn get_contract_index(&self, address: &ContractAddress) -> Option<usize> {
@@ -482,7 +599,11 @@ impl<Mac: SupportMachine> RunContext<Mac> for CsalRunContext {
                 let data_address = machine.registers()[A0].to_u64();
                 let data_length = machine.registers()[A1].to_u32();
                 let data = load_data(machine, data_address, data_length)?;
-                *self.current_contract_info_mut().current_return_data_mut() = data.into();
+                let info = self.current_contract_info_mut();
+                info.current_record_mut().return_data = data.clone().into();
+                if info.is_create() {
+                    info.code = data.into();
+                }
                 // self.return_data = data.into();
                 Ok(true)
             }
@@ -492,7 +613,8 @@ impl<Mac: SupportMachine> RunContext<Mac> for CsalRunContext {
                 let data_length = machine.registers()[A1].to_u32();
                 let data = load_data(machine, data_address, data_length)?;
                 self.current_contract_info_mut()
-                    .current_logs_mut()
+                    .current_record_mut()
+                    .logs
                     .push(data.into());
                 // self.logs.push(data.into());
                 Ok(true)
@@ -512,11 +634,105 @@ impl<Mac: SupportMachine> RunContext<Mac> for CsalRunContext {
             // CALL
             3078 => {
                 // FIXME:
+                let mut msg_data_address = machine.registers()[A0].to_u64();
+                let kind_value: u8 = load_u8(machine, msg_data_address)?;
+                msg_data_address += 1;
+                let flags: u32 = load_u32(machine, msg_data_address)?;
+                msg_data_address += 4;
+                let depth: i32 = load_i32(machine, msg_data_address)?;
+                msg_data_address += 4;
+                let _gas: i64 = load_i64(machine, msg_data_address)?;
+                msg_data_address += 8;
+                let destination: H160 = load_h160(machine, msg_data_address)?;
+                msg_data_address += 20;
+                let sender: H160 = load_h160(machine, msg_data_address)?;
+                msg_data_address += 20;
+                let input_size: u32 = load_u32(machine, msg_data_address)?;
+                msg_data_address += 4;
+                let input_data: Vec<u8> = load_data(machine, msg_data_address, input_size)?;
+                msg_data_address += input_size as u64;
+                let _value: H256 = load_h256(machine, msg_data_address)?;
+
+                let destination = ContractAddress(destination);
+                let kind = CallKind::try_from(kind_value).unwrap();
+                let (code, input) = if kind == CallKind::CREATE {
+                    (Bytes::from(input_data), Bytes::default())
+                } else {
+                    let code = self
+                        .get_contract_code(&destination)
+                        .map_err(|_err| VMError::IO(std::io::ErrorKind::InvalidInput))?;
+                    (code, Bytes::from(input_data))
+                };
+                let program = Program {
+                    kind,
+                    flags,
+                    depth: depth as u32,
+                    tx_origin: self.tx_origin.clone(),
+                    sender,
+                    destination,
+                    code,
+                    input,
+                };
+                let saved_contract_index = self.contract_index;
+                self.run(program, None)
+                    .map_err(|_err| VMError::Unexpected)?;
+                let return_data = self.current_contract_info().current_return_data().clone();
+                let create_address = if kind == CallKind::CREATE {
+                    self.current_contract_address().clone()
+                } else {
+                    ContractAddress(H160::default())
+                };
+                self.contract_index = saved_contract_index;
+
+                let result_data_address = machine.registers()[A0].to_u64();
+                let mut result_data = BytesMut::default();
+                result_data.put(&(return_data.len() as u32).to_le_bytes()[..]);
+                result_data.put(return_data.as_ref());
+                result_data.put(create_address.0.as_bytes());
+                machine
+                    .memory_mut()
+                    .store_bytes(result_data_address, result_data.as_ref())?;
                 Ok(true)
             }
             _ => Ok(false),
         }
     }
+}
+
+fn load_u8<Mac: SupportMachine>(machine: &mut Mac, address: u64) -> Result<u8, VMError> {
+    let data = load_data(machine, address, 1)?;
+    Ok(data[0])
+}
+
+fn load_i32<Mac: SupportMachine>(machine: &mut Mac, address: u64) -> Result<i32, VMError> {
+    let data = load_data(machine, address, 4)?;
+    let mut i32_bytes = [0u8; 4];
+    i32_bytes.copy_from_slice(&data);
+    Ok(i32::from_le_bytes(i32_bytes))
+}
+
+fn load_u32<Mac: SupportMachine>(machine: &mut Mac, address: u64) -> Result<u32, VMError> {
+    let data = load_data(machine, address, 4)?;
+    let mut u32_bytes = [0u8; 4];
+    u32_bytes.copy_from_slice(&data);
+    Ok(u32::from_le_bytes(u32_bytes))
+}
+
+fn load_i64<Mac: SupportMachine>(machine: &mut Mac, address: u64) -> Result<i64, VMError> {
+    let data = load_data(machine, address, 8)?;
+    let mut i64_bytes = [0u8; 8];
+    i64_bytes.copy_from_slice(&data);
+    Ok(i64::from_le_bytes(i64_bytes))
+}
+
+fn load_h160<Mac: SupportMachine>(machine: &mut Mac, address: u64) -> Result<H160, VMError> {
+    let data = load_data(machine, address, 20)?;
+    Ok(H160::from_slice(&data).unwrap())
+}
+
+fn load_h256<Mac: SupportMachine>(machine: &mut Mac, address: u64) -> Result<H256, VMError> {
+    let data = load_data(machine, address, 32)?;
+    Ok(H256::from_slice(&data).unwrap())
 }
 
 fn load_data<Mac: SupportMachine>(

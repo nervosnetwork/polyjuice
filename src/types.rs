@@ -137,7 +137,7 @@ pub struct Program {
     /// The transaction origin address (TODO: EoA sender address?)
     pub tx_origin: EoaAddress,
     /// The sender of the message. (MUST be verified by the signature in witness data)
-    pub sender: EoaAddress,
+    pub sender: H160,
     /// The destination of the message (MUST be verified by the script args).
     pub destination: ContractAddress,
     /// The code to create/call the contract
@@ -160,7 +160,7 @@ pub struct ContractMeta {
 /// Represent a change record of a contract call
 #[derive(Default)]
 pub struct ContractChange {
-    pub sender: EoaAddress,
+    pub sender: H160,
     pub address: ContractAddress,
     /// Block number
     pub number: u64,
@@ -288,7 +288,7 @@ impl TryFrom<&[u8]> for WitnessData {
 }
 
 impl Program {
-    pub fn new_create(tx_origin: EoaAddress, sender: EoaAddress, code: Bytes) -> Program {
+    pub fn new_create(tx_origin: EoaAddress, sender: H160, code: Bytes) -> Program {
         Program {
             kind: CallKind::CREATE,
             flags: 0,
@@ -303,7 +303,7 @@ impl Program {
 
     pub fn new_call(
         tx_origin: EoaAddress,
-        sender: EoaAddress,
+        sender: H160,
         destination: ContractAddress,
         code: Bytes,
         input: Bytes,
@@ -332,7 +332,7 @@ impl Program {
         buf.put(&self.flags.to_le_bytes()[..]);
         buf.put(&self.depth.to_le_bytes()[..]);
         buf.put(self.tx_origin.0.as_bytes());
-        buf.put(self.sender.0.as_bytes());
+        buf.put(self.sender.as_bytes());
         buf.put(self.destination.0.as_bytes());
 
         buf.put(&(self.code.len() as u32).to_le_bytes()[..]);
@@ -359,7 +359,7 @@ impl TryFrom<&[u8]> for Program {
         let flags = load_u32(data, &mut offset)?;
         let depth = load_u32(data, &mut offset)?;
         let tx_origin = EoaAddress(load_h160(data, &mut offset)?);
-        let sender = EoaAddress(load_h160(data, &mut offset)?);
+        let sender = load_h160(data, &mut offset)?;
         let destination = ContractAddress(load_h160(data, &mut offset)?);
         let code = load_var_slice(data, &mut offset)?;
         let input = load_var_slice(data, &mut offset)?;
@@ -469,11 +469,11 @@ impl WitnessData {
             .map_err(|err| err.to_string())
     }
 
-    pub fn recover_sender(&self, tx_hash: &H256) -> Result<EoaAddress, String> {
+    pub fn recover_sender(&self, tx_hash: &H256) -> Result<H160, String> {
         let pubkey = self.recover_pubkey(tx_hash)?;
         let hash = H160::from_slice(&blake2b_256(&pubkey.serialize()[..])[0..20])
             .expect("Generate hash(H160) from pubkey failed");
-        Ok(EoaAddress(hash))
+        Ok(hash)
     }
 }
 

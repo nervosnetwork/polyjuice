@@ -2,7 +2,7 @@ use bincode::serialize;
 use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::ScriptHashType;
 use ckb_simple_account_layer::{CkbBlake2bHasher, Config};
-use ckb_types::{bytes::Bytes, core, packed, prelude::*, H256};
+use ckb_types::{bytes::Bytes, core, packed, prelude::*, H160, H256};
 use rocksdb::{WriteBatch, DB};
 use sparse_merkle_tree::{default_store::DefaultStore, SparseMerkleTree, H256 as SmtH256};
 use std::collections::{HashMap, HashSet};
@@ -15,7 +15,7 @@ use super::{db_get, value, CsalRunContext, Key, Loader};
 use crate::client::HttpRpcClient;
 use crate::types::{
     h256_to_smth256, parse_log, smth256_to_h256, ContractAddress, ContractChange, ContractMeta,
-    EoaAddress, RunConfig, WitnessData,
+    RunConfig, WitnessData,
 };
 
 pub const TYPE_ARGS_LEN: usize = 20;
@@ -382,6 +382,7 @@ impl Indexer {
                         let output_index = witness_index;
                         let is_create = !contract_inputs.contains_key(address);
                         match generate_change(
+                            &self.loader,
                             &self.run_config,
                             &tx_hash,
                             address,
@@ -395,13 +396,13 @@ impl Indexer {
                                 if is_create {
                                     log::info!(
                                         "[CREATE]: sender={:x}, contract={:x}",
-                                        sender.0,
+                                        sender,
                                         address.0
                                     );
                                 } else {
                                     log::info!(
                                         "[CALL]: sender={:x}, contract={:x}",
-                                        sender.0,
+                                        sender,
                                         address.0
                                     );
                                 }
@@ -457,15 +458,12 @@ impl Indexer {
                             WitnessData::try_from(witness_data.as_ref())
                         })?;
                     let program_data = witness_data.program_data();
-                    let tree = self
-                        .loader
-                        .load_latest_contract_change(address.clone(), None, false, true)?
-                        .merkle_tree();
                     let config: Config = (&self.run_config).into();
                     // FIXME: one transaction can have only one root contract
-                    let mut context = CsalRunContext::new(config, first_cell_input.clone());
+                    let mut context =
+                        CsalRunContext::new(self.loader.clone(), config, first_cell_input.clone());
                     let result = context
-                        .run(tree, witness_data.program.clone())
+                        .run(witness_data.program.clone(), None)
                         .map_err(|err| err.to_string())?;
                     if context.current_contract_info().selfdestruct.is_none() {
                         panic!("Not a selfdestruct call: tx_hash={:x}", tx_hash);
@@ -474,7 +472,7 @@ impl Indexer {
                     assert_eq!(sender, witness_data.program.sender);
                     log::info!(
                         "[SELFDESTRUCT]: sender={:x}, contract={:x}",
-                        sender.0,
+                        sender,
                         address.0
                     );
                     destructed_contracts.push(address);
@@ -598,6 +596,7 @@ impl Indexer {
 }
 
 fn generate_change(
+    loader: &Loader,
     run_config: &RunConfig,
     tx_hash: &H256,
     address: &ContractAddress,
@@ -606,15 +605,7 @@ fn generate_change(
     input: Option<(HashMap<H256, H256>, Bytes, usize)>,
     first_cell_input: packed::CellInput,
     is_create: bool,
-) -> Result<
-    (
-        EoaAddress,
-        HashMap<H256, H256>,
-        Vec<(Vec<H256>, Bytes)>,
-        Bytes,
-    ),
-    String,
-> {
+) -> Result<(H160, HashMap<H256, H256>, Vec<(Vec<H256>, Bytes)>, Bytes), String> {
     let witness_data = packed::WitnessArgs::from_slice(witness)
         .map_err(|err| err.to_string())
         .and_then(|witness_args| {
@@ -661,6 +652,7 @@ fn generate_change(
         }
         (tree, witness_data.program.code.clone())
     } else {
+        // Create contract
         let code_hash = blake2b_256(&witness_data.return_data);
         if code_hash[..] != output_data[32..64] {
             return Err(String::from(
@@ -674,10 +666,10 @@ fn generate_change(
     };
 
     let config: Config = run_config.into();
-    let mut context = CsalRunContext::new(config, first_cell_input);
+    let mut context = CsalRunContext::new(loader.clone(), config, first_cell_input);
     let new_tree = SparseMerkleTree::new(*tree.root(), tree.store().clone());
     let result = context
-        .run(new_tree, witness_data.program.clone())
+        .run(witness_data.program.clone(), Some(new_tree))
         .map_err(|err| err.to_string())?;
     result.commit(&mut tree).unwrap();
     let new_root_hash: [u8; 32] = (*tree.root()).into();

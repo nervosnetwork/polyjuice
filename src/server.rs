@@ -1,10 +1,8 @@
 use crate::storage::{CsalRunContext, Loader, Runner};
-use crate::types::{
-    parse_log, ContractAddress, ContractChange, ContractMeta, EoaAddress, RunConfig,
-};
+use crate::types::{parse_log, ContractAddress, ContractChange, ContractMeta, RunConfig};
 use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::{JsonBytes, Transaction};
-use ckb_types::{bytes::Bytes, H256};
+use ckb_types::{bytes::Bytes, H160, H256};
 use jsonrpc_core::{Error, ErrorCode, Result as RpcResult};
 use jsonrpc_derive::rpc;
 use serde::{Deserialize, Serialize};
@@ -15,12 +13,12 @@ use std::sync::Arc;
 #[rpc(server)]
 pub trait Rpc {
     #[rpc(name = "create")]
-    fn create(&self, sender: EoaAddress, code: JsonBytes) -> RpcResult<TransactionReceipt>;
+    fn create(&self, sender: H160, code: JsonBytes) -> RpcResult<TransactionReceipt>;
 
     #[rpc(name = "call")]
     fn call(
         &self,
-        sender: EoaAddress,
+        sender: H160,
         contract_address: ContractAddress,
         input: JsonBytes,
     ) -> RpcResult<TransactionReceipt>;
@@ -28,7 +26,7 @@ pub trait Rpc {
     #[rpc(name = "static_call")]
     fn static_call(
         &self,
-        sender: EoaAddress,
+        sender: H160,
         contract_address: ContractAddress,
         input: JsonBytes,
     ) -> RpcResult<StaticCallResponse>;
@@ -67,7 +65,7 @@ pub struct RpcImpl {
 }
 
 impl Rpc for RpcImpl {
-    fn create(&self, sender: EoaAddress, code: JsonBytes) -> RpcResult<TransactionReceipt> {
+    fn create(&self, sender: H160, code: JsonBytes) -> RpcResult<TransactionReceipt> {
         let loader = Loader::clone(&self.loader);
         let run_config = self.run_config.clone();
         let (contract_address, tx, result, context) = Runner::new(loader, run_config)
@@ -99,7 +97,7 @@ impl Rpc for RpcImpl {
 
     fn call(
         &self,
-        sender: EoaAddress,
+        sender: H160,
         contract_address: ContractAddress,
         input: JsonBytes,
     ) -> RpcResult<TransactionReceipt> {
@@ -134,7 +132,7 @@ impl Rpc for RpcImpl {
 
     fn static_call(
         &self,
-        sender: EoaAddress,
+        sender: H160,
         contract_address: ContractAddress,
         input: JsonBytes,
     ) -> RpcResult<StaticCallResponse> {
@@ -226,7 +224,7 @@ fn convert_err_box(err: Box<dyn StdError>) -> Error {
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 pub struct ContractChangeJson {
-    pub sender: EoaAddress,
+    pub sender: H160,
     pub address: ContractAddress,
     /// Block number
     pub number: u64,
