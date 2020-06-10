@@ -15,7 +15,6 @@ use clap::{App, Arg, SubCommand};
 use rocksdb::DB;
 use serde::{Deserialize, Serialize};
 use server::{Rpc, RpcImpl, TransactionReceipt};
-use std::convert::TryFrom;
 use std::fs;
 use std::process::Command;
 use std::sync::{Arc, Condvar, Mutex};
@@ -230,7 +229,8 @@ fn main() -> Result<(), String> {
                 .or_else(|| witness_args.input_type().to_opt())
                 .ok_or_else(|| String::from("can not find output_type/input_type in witness"))
                 .map(|witness_data| witness_data.raw_data())?;
-            let mut witness_data = WitnessData::try_from(raw_witness.as_ref())?;
+            // FIXME: multiple WitnessData
+            let mut witness_data = WitnessData::load_from(raw_witness.as_ref())?.unwrap().1;
 
             println!("Building signature");
             let tx = packed::Transaction::from(tx_receipt.tx.clone());

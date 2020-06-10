@@ -1,5 +1,5 @@
 use crate::storage::{CsalRunContext, Loader, Runner};
-use crate::types::{parse_log, ContractAddress, ContractChange, ContractMeta, RunConfig};
+use crate::types::{ContractAddress, ContractChange, ContractMeta, EoaAddress, RunConfig};
 use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::{JsonBytes, Transaction};
 use ckb_types::{bytes::Bytes, H160, H256};
@@ -68,31 +68,10 @@ impl Rpc for RpcImpl {
     fn create(&self, sender: H160, code: JsonBytes) -> RpcResult<TransactionReceipt> {
         let loader = Loader::clone(&self.loader);
         let run_config = self.run_config.clone();
-        let (contract_address, tx, result, context) = Runner::new(loader, run_config)
+        let context = Runner::new(loader, run_config)
             .create(sender, code.into_bytes())
             .map_err(convert_err_box)?;
-
-        let logs = context
-            .current_contract_info()
-            .current_logs()
-            .iter()
-            .map(|log_data| {
-                parse_log(log_data.as_ref())
-                    .map(|(topics, data)| LogEntry::new(contract_address.clone(), topics, data))
-            })
-            .collect::<Result<Vec<_>, String>>()
-            .map_err(convert_err)?;
-        Ok(TransactionReceipt {
-            tx: Transaction::from(tx),
-            contract_address: Some(contract_address),
-            return_data: Some(JsonBytes::from_bytes(
-                context
-                    .current_contract_info()
-                    .current_return_data()
-                    .clone(),
-            )),
-            logs,
-        })
+        TransactionReceipt::try_from(context).map_err(convert_err)
     }
 
     fn call(
@@ -103,31 +82,10 @@ impl Rpc for RpcImpl {
     ) -> RpcResult<TransactionReceipt> {
         let loader = Loader::clone(&self.loader);
         let run_config = self.run_config.clone();
-        let (tx, result, context) = Runner::new(loader, run_config)
-            .call(sender, contract_address.clone(), input.into_bytes())
+        let context = Runner::new(loader, run_config)
+            .call(sender, contract_address, input.into_bytes())
             .map_err(convert_err_box)?;
-
-        let logs = context
-            .current_contract_info()
-            .current_logs()
-            .iter()
-            .map(|log_data| {
-                parse_log(log_data.as_ref())
-                    .map(|(topics, data)| LogEntry::new(contract_address.clone(), topics, data))
-            })
-            .collect::<Result<Vec<_>, String>>()
-            .map_err(convert_err)?;
-        Ok(TransactionReceipt {
-            tx: Transaction::from(tx),
-            contract_address: None,
-            return_data: Some(JsonBytes::from_bytes(
-                context
-                    .current_contract_info()
-                    .current_return_data()
-                    .clone(),
-            )),
-            logs,
-        })
+        TransactionReceipt::try_from(context).map_err(convert_err)
     }
 
     fn static_call(
@@ -138,10 +96,10 @@ impl Rpc for RpcImpl {
     ) -> RpcResult<StaticCallResponse> {
         let loader = Loader::clone(&self.loader);
         let run_config = self.run_config.clone();
-        let (_result, context) = Runner::new(loader, run_config)
-            .static_call(sender, contract_address.clone(), input.into_bytes())
+        let context = Runner::new(loader, run_config)
+            .static_call(sender, contract_address, input.into_bytes())
             .map_err(convert_err_box)?;
-        StaticCallResponse::try_from((context, contract_address)).map_err(convert_err)
+        StaticCallResponse::try_from(context).map_err(convert_err)
     }
 
     fn get_code(&self, contract_address: ContractAddress) -> RpcResult<ContractCodeJson> {
@@ -224,7 +182,7 @@ fn convert_err_box(err: Box<dyn StdError>) -> Error {
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 pub struct ContractChangeJson {
-    pub sender: H160,
+    pub tx_origin: EoaAddress,
     pub address: ContractAddress,
     /// Block number
     pub number: u64,
@@ -242,7 +200,7 @@ pub struct ContractChangeJson {
 impl From<ContractChange> for ContractChangeJson {
     fn from(change: ContractChange) -> ContractChangeJson {
         ContractChangeJson {
-            sender: change.sender,
+            tx_origin: change.tx_origin,
             address: change.address,
             number: change.number,
             tx_index: change.tx_index,
@@ -305,10 +263,41 @@ impl LogEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransactionReceipt {
     pub tx: Transaction,
-    /// The newly created contract's address (Program.depth=0)
-    pub contract_address: Option<ContractAddress>,
-    pub return_data: Option<JsonBytes>,
+    pub entrance_contract: ContractAddress,
+    /// The newly created contract's address
+    pub created_addresses: Vec<ContractAddress>,
+    /// Destructed contract addresses
+    pub destructed_addresses: Vec<ContractAddress>,
     pub logs: Vec<LogEntry>,
+    pub return_data: Option<JsonBytes>,
+}
+
+impl TryFrom<CsalRunContext> for TransactionReceipt {
+    type Error = String;
+    fn try_from(mut context: CsalRunContext) -> Result<TransactionReceipt, String> {
+        let tx = context.build_tx().map_err(|err| err.to_string())?;
+        let entrance_contract = context.entrance_contract();
+        let created_addresses = context.created_contracts();
+        let destructed_addresses = context.destructed_contracts();
+        let logs = context
+            .get_logs()?
+            .into_iter()
+            .map(|(addr, topics, data)| LogEntry::new(addr, topics, data))
+            .collect::<Vec<_>>();
+        let return_data = if context.is_create() {
+            Some(JsonBytes::from_bytes(context.entrance_info().return_data()))
+        } else {
+            None
+        };
+        Ok(TransactionReceipt {
+            tx: Transaction::from(tx),
+            entrance_contract,
+            created_addresses,
+            destructed_addresses,
+            logs,
+            return_data,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -317,27 +306,17 @@ pub struct StaticCallResponse {
     logs: Vec<LogEntry>,
 }
 
-impl TryFrom<(CsalRunContext, ContractAddress)> for StaticCallResponse {
+impl TryFrom<CsalRunContext> for StaticCallResponse {
     type Error = String;
-    fn try_from(
-        (context, contract_address): (CsalRunContext, ContractAddress),
-    ) -> Result<StaticCallResponse, String> {
+    fn try_from(context: CsalRunContext) -> Result<StaticCallResponse, String> {
+        let logs = context
+            .get_logs()?
+            .into_iter()
+            .map(|(addr, topics, data)| LogEntry::new(addr, topics, data))
+            .collect::<Vec<_>>();
         Ok(StaticCallResponse {
-            return_data: JsonBytes::from_bytes(
-                context
-                    .current_contract_info()
-                    .current_return_data()
-                    .clone(),
-            ),
-            logs: context
-                .current_contract_info()
-                .current_logs()
-                .iter()
-                .map(|log_data| {
-                    parse_log(log_data.as_ref())
-                        .map(|(topics, data)| LogEntry::new(contract_address.clone(), topics, data))
-                })
-                .collect::<Result<Vec<_>, String>>()?,
+            return_data: JsonBytes::from_bytes(context.entrance_info().return_data()),
+            logs,
         })
     }
 }

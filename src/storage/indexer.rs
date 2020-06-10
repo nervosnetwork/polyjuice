@@ -1,20 +1,30 @@
 use bincode::serialize;
-use ckb_hash::blake2b_256;
-use ckb_jsonrpc_types::ScriptHashType;
-use ckb_simple_account_layer::{CkbBlake2bHasher, Config};
-use ckb_types::{bytes::Bytes, core, packed, prelude::*, H160, H256};
+use ckb_jsonrpc_types::{JsonBytes, ScriptHashType};
+use ckb_simple_account_layer::{run_with_context, CkbBlake2bHasher, Config, RunContext};
+use ckb_types::{
+    bytes::{BufMut, Bytes, BytesMut},
+    core, packed,
+    prelude::*,
+    H160, H256,
+};
+use ckb_vm::{
+    registers::{A0, A1, A7},
+    Error as VMError, Memory, Register, SupportMachine,
+};
 use rocksdb::{WriteBatch, DB};
 use sparse_merkle_tree::{default_store::DefaultStore, SparseMerkleTree, H256 as SmtH256};
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
+use std::error::Error as StdError;
 use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 
-use super::{db_get, value, CsalRunContext, Key, Loader};
+use super::{db_get, value, Key, Loader};
 use crate::client::HttpRpcClient;
 use crate::types::{
-    h256_to_smth256, parse_log, smth256_to_h256, ContractAddress, ContractChange, ContractMeta,
+    parse_log, smth256_to_h256, vm_load_data, vm_load_h160, vm_load_h256, vm_load_i32, vm_load_i64,
+    vm_load_u32, vm_load_u8, CallKind, ContractAddress, ContractChange, ContractMeta, EoaAddress,
     RunConfig, WitnessData,
 };
 
@@ -193,15 +203,16 @@ impl Indexer {
                 next_number
             );
 
+            let mut block_changes: Vec<ContractChange> = Vec::new();
+            let mut block_codes: Vec<ContractMeta> = Vec::new();
+            let mut destructed_contracts: Vec<ContractAddress> = Vec::new();
+
             let mut added_cells: HashSet<(H256, u32, u32, value::LockLiveCell)> = HashSet::new();
             let mut removed_cells: HashSet<(H256, u64, u32, u32, value::LockLiveCell)> =
                 HashSet::new();
-            let mut block_changes: Vec<ContractChange> = Vec::new();
-            let mut block_codes: Vec<ContractMeta> = Vec::new();
             let mut block_added_cells: HashMap<value::LockLiveCell, value::LiveCellMap> =
                 HashMap::default();
             let mut block_removed_cells: HashSet<value::LockLiveCell> = HashSet::default();
-            let mut destructed_contracts: Vec<ContractAddress> = Vec::new();
             for (tx_index, (tx, tx_hash)) in next_block
                 .transactions
                 .into_iter()
@@ -213,15 +224,7 @@ impl Indexer {
                 //   1. block number
                 //   2. tx_hash
                 //   3. tx_index
-
-                let mut output_addresses: HashSet<ContractAddress> = HashSet::default();
-                let mut contract_inputs: HashMap<
-                    ContractAddress,
-                    (HashMap<H256, H256>, Bytes, usize),
-                > = HashMap::default();
-                let mut contract_outputs: HashMap<usize, (ContractAddress, Bytes)> =
-                    HashMap::default();
-                let mut first_cell_input = packed::CellInput::default();
+                let mut script_groups: HashMap<ContractAddress, ContractInfo> = HashMap::default();
 
                 for (input_index, input) in tx.inputs.into_iter().enumerate() {
                     // Information from input
@@ -230,9 +233,6 @@ impl Indexer {
                     //   - old storage
                     if input.previous_output.tx_hash == H256::default() {
                         continue;
-                    }
-                    if input_index == 0 {
-                        first_cell_input = packed::CellInput::from(input.clone());
                     }
 
                     let prev_tx = self
@@ -273,12 +273,10 @@ impl Indexer {
                             false,
                             true,
                         )?;
-                        if contract_inputs
-                            .insert(address, (change.new_storage, data, input_index))
-                            .is_some()
-                        {
-                            panic!("Whey type script is not a type_id script?");
-                        }
+                        let mut info = ContractInfo::default();
+                        info.tree = change.merkle_tree();
+                        info.input = Some((input_index, change));
+                        script_groups.insert(address, info);
                     }
                     let out_point = packed::OutPoint::from(input.previous_output.clone());
                     let prev_tx_hash = input.previous_output.tx_hash;
@@ -339,10 +337,12 @@ impl Indexer {
                         log::debug!("match type script: output_index={}", output_index);
                         let address = ContractAddress::try_from(type_script.args.as_bytes())
                             .expect("checked length");
-                        if !output_addresses.insert(address.clone()) {
-                            panic!("Why type script is not a type_id script?");
+                        let info = script_groups.entry(address).or_default();
+                        if info.output.is_some() {
+                            panic!("multiple output contract address");
                         }
-                        contract_outputs.insert(output_index, (address, data));
+                        info.output =
+                            Some((output_index, packed::CellOutput::from(output.clone())));
                     }
                     let lock_hash: H256 = packed::Script::from(output.lock)
                         .calc_script_hash()
@@ -367,119 +367,18 @@ impl Indexer {
                     added_cells.insert((lock_hash, tx_index as u32, output_index as u32, value));
                 }
 
-                let mut tx_changes: Vec<ContractChange> = Vec::new();
-                let mut tx_codes: Vec<ContractMeta> = Vec::new();
-                for (witness_index, witness) in tx.witnesses.iter().enumerate() {
-                    // Information from witness
-                    //   1. sender address (from signature in witness type field)
-                    //   2. new_storage (after run the validator)
-                    //   3. logs (after run the validator)
-
-                    // NOTE:
-                    //   1. output index must consist with witness index
-                    //   2. witness data is in output_type field
-                    if let Some((address, output_data)) = contract_outputs.get(&witness_index) {
-                        let output_index = witness_index;
-                        let is_create = !contract_inputs.contains_key(address);
-                        match generate_change(
-                            &self.loader,
-                            &self.run_config,
-                            &tx_hash,
-                            address,
-                            witness.as_bytes(),
-                            output_data,
-                            contract_inputs.remove(address),
-                            first_cell_input.clone(),
-                            is_create,
-                        ) {
-                            Ok((sender, new_storage, logs, code)) => {
-                                if is_create {
-                                    log::info!(
-                                        "[CREATE]: sender={:x}, contract={:x}",
-                                        sender,
-                                        address.0
-                                    );
-                                } else {
-                                    log::info!(
-                                        "[CALL]: sender={:x}, contract={:x}",
-                                        sender,
-                                        address.0
-                                    );
-                                }
-                                tx_changes.push(ContractChange {
-                                    sender,
-                                    new_storage,
-                                    is_create,
-                                    logs,
-                                    address: address.clone(),
-                                    number: next_number,
-                                    tx_hash: tx_hash.clone(),
-                                    tx_index: tx_index as u32,
-                                    output_index: output_index as u32,
-                                });
-                                if is_create {
-                                    tx_codes.push(ContractMeta {
-                                        address: address.clone(),
-                                        code,
-                                        tx_hash: tx_hash.clone(),
-                                        output_index: output_index as u32,
-                                        destructed: false,
-                                    });
-                                }
-                            }
-                            Err(err) => {
-                                log::error!("Generate change error: {}", err);
-                                tx_changes.clear();
-                                tx_codes.clear();
-                                break;
-                            }
-                        }
-                    }
+                if let Some(mut extractor) = ContractExtractor::init(
+                    self.run_config.clone(),
+                    tx_hash,
+                    tx_index as u32,
+                    tx.witnesses,
+                    script_groups,
+                )? {
+                    extractor.run().map_err(|err| err.to_string())?;
+                    block_changes.extend(extractor.get_contract_changes(next_number));
+                    block_codes.extend(extractor.get_created_contracts());
+                    destructed_contracts.extend(extractor.get_destructed_contracts());
                 }
-
-                // The result inputs are selfdestruct contract call
-                // FIXME: one transaction can have only one root contract
-                for (address, (old_storage, data, input_index)) in contract_inputs {
-                    let witness = tx.witnesses[input_index].as_bytes();
-                    let witness_data = packed::WitnessArgs::from_slice(witness)
-                        .map_err(|err| err.to_string())
-                        .and_then(|witness_args| {
-                            witness_args
-                                .input_type()
-                                .to_opt()
-                                .ok_or_else(|| String::from("can not find input_type in witness"))
-                        })
-                        .map(|witness_data| witness_data.raw_data())
-                        .and_then(|witness_data| {
-                            log::debug!(
-                                "WitnessArgs::input_type => {}",
-                                hex::encode(witness_data.as_ref())
-                            );
-                            WitnessData::try_from(witness_data.as_ref())
-                        })?;
-                    let program_data = witness_data.program_data();
-                    let config: Config = (&self.run_config).into();
-                    // FIXME: one transaction can have only one root contract
-                    let mut context =
-                        CsalRunContext::new(self.loader.clone(), config, first_cell_input.clone());
-                    let result = context
-                        .run(witness_data.program.clone(), None)
-                        .map_err(|err| err.to_string())?;
-                    if context.current_contract_info().selfdestruct.is_none() {
-                        panic!("Not a selfdestruct call: tx_hash={:x}", tx_hash);
-                    }
-                    let sender = witness_data.recover_sender(&tx_hash)?;
-                    assert_eq!(sender, witness_data.program.sender);
-                    log::info!(
-                        "[SELFDESTRUCT]: sender={:x}, contract={:x}",
-                        sender,
-                        address.0
-                    );
-                    destructed_contracts.push(address);
-                }
-
-                block_changes.extend(tx_changes);
-                block_codes.extend(tx_codes);
             }
 
             let mut batch = WriteBatch::default();
@@ -595,103 +494,290 @@ impl Indexer {
     }
 }
 
-fn generate_change(
-    loader: &Loader,
-    run_config: &RunConfig,
-    tx_hash: &H256,
-    address: &ContractAddress,
-    witness: &[u8],
-    output_data: &Bytes,
-    input: Option<(HashMap<H256, H256>, Bytes, usize)>,
-    first_cell_input: packed::CellInput,
-    is_create: bool,
-) -> Result<(H160, HashMap<H256, H256>, Vec<(Vec<H256>, Bytes)>, Bytes), String> {
-    let witness_data = packed::WitnessArgs::from_slice(witness)
-        .map_err(|err| err.to_string())
-        .and_then(|witness_args| {
-            let actual_witness = if is_create {
-                witness_args.output_type()
-            } else {
-                witness_args.input_type()
-            };
-            actual_witness
-                .to_opt()
-                .ok_or_else(|| String::from("can not find output_type in witness"))
-        })
-        .map(|witness_data| witness_data.raw_data())
-        .and_then(|witness_data| {
-            log::debug!(
-                "WitnessArgs::output_type => {}",
-                hex::encode(witness_data.as_ref())
-            );
-            WitnessData::try_from(witness_data.as_ref())
-        })?;
-    let program_data = witness_data.program_data();
+// Extract eth contract changes from CKB transaction
+//   0. produce contract metas (CREATE)
+//   1. produce contract changes
+//   2. produce contract logs
+//   3. produce SELFDESTRUCT contracts
+struct ContractExtractor {
+    run_config: RunConfig,
+    tx_hash: H256,
+    tx_index: u32,
+    tx_origin: EoaAddress,
+    entrance_contract: ContractAddress,
+    current_contract: ContractAddress,
 
-    let (mut tree, code) = if let Some((old_storage, input_data, _idx)) = input {
-        // Call contract
-        let code_hash = blake2b_256(&witness_data.program.code);
-        if code_hash[..] != input_data[32..64] {
-            return Err(String::from("Code hash in input not match code in witness"));
-        }
-        if input_data[32..64] != output_data[32..64] {
-            return Err(String::from(
-                "input data code hash not match output data code hash",
-            ));
-        }
+    // script_hash => (input, output, programs)
+    script_groups: HashMap<ContractAddress, ContractInfo>,
+}
 
-        let mut tree: SparseMerkleTree<CkbBlake2bHasher, SmtH256, DefaultStore<SmtH256>> =
-            SparseMerkleTree::default();
-        for (key, value) in &old_storage {
-            tree.update(h256_to_smth256(key), h256_to_smth256(value))
-                .unwrap();
-        }
-        let old_root_hash: [u8; 32] = (*tree.root()).into();
-        if old_root_hash[..] != input_data[0..32] {
-            panic!("Storage root in input_data not match the state");
-        }
-        (tree, witness_data.program.code.clone())
-    } else {
-        // Create contract
-        let code_hash = blake2b_256(&witness_data.return_data);
-        if code_hash[..] != output_data[32..64] {
-            return Err(String::from(
-                "return data hash not match output data code hash",
-            ));
-        }
-        (
-            SparseMerkleTree::default(),
-            witness_data.return_data.clone(),
-        )
-    };
+#[derive(Default)]
+struct ContractInfo {
+    input: Option<(usize, ContractChange)>,
+    output: Option<(usize, packed::CellOutput)>,
+    // Increased by 1 after ckb-vm run a program
+    program_index: usize,
+    programs: Vec<WitnessData>,
+    // Updated by ckb-vm
+    logs: Vec<(Vec<H256>, Bytes)>,
+    // Updated by ckb-vm
+    tree: SparseMerkleTree<CkbBlake2bHasher, SmtH256, DefaultStore<SmtH256>>,
+}
 
-    let config: Config = run_config.into();
-    let mut context = CsalRunContext::new(loader.clone(), config, first_cell_input);
-    let new_tree = SparseMerkleTree::new(*tree.root(), tree.store().clone());
-    let result = context
-        .run(witness_data.program.clone(), Some(new_tree))
-        .map_err(|err| err.to_string())?;
-    result.commit(&mut tree).unwrap();
-    let new_root_hash: [u8; 32] = (*tree.root()).into();
-    if new_root_hash[..] != output_data[0..32] {
-        return Err(String::from(
-            "New storage root not match storage root in input data",
-        ));
+impl ContractInfo {
+    pub fn selfdestruct(&self) -> Option<&H160> {
+        assert_eq!(
+            self.output.is_none(),
+            self.programs[self.programs.len() - 1]
+                .selfdestruct
+                .is_some(),
+        );
+        self.programs[self.programs.len() - 1].selfdestruct.as_ref()
     }
-    let new_storage: HashMap<H256, H256> = tree
-        .store()
-        .leaves_map()
-        .values()
-        .map(|leaf| (smth256_to_h256(&leaf.key), smth256_to_h256(&leaf.value)))
-        .collect();
+    pub fn is_create(&self) -> bool {
+        self.input.is_none()
+    }
+    pub fn code(&self) -> Bytes {
+        if self.is_create() {
+            self.programs[0].return_data.clone()
+        } else {
+            self.programs[0].program.code.clone()
+        }
+    }
 
-    let sender = witness_data.recover_sender(tx_hash)?;
-    assert_eq!(sender, witness_data.program.sender);
-    let logs = context
-        .current_contract_info()
-        .current_logs()
-        .iter()
-        .map(|log_data| parse_log(log_data.as_ref()))
-        .collect::<Result<Vec<_>, String>>()?;
-    Ok((sender, new_storage, logs, code))
+    pub fn current_program(&self) -> &WitnessData {
+        &self.programs[self.program_index]
+    }
+
+    pub fn get_meta(&self, address: &ContractAddress, tx_hash: &H256) -> Option<ContractMeta> {
+        if self.is_create() {
+            let output_index = self.output.as_ref().map(|(index, _)| *index).unwrap() as u32;
+            Some(ContractMeta {
+                address: address.clone(),
+                code: self.code(),
+                tx_hash: tx_hash.clone(),
+                output_index,
+                destructed: false,
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn get_change(
+        &self,
+        address: &ContractAddress,
+        number: u64,
+        tx_index: u32,
+        tx_hash: &H256,
+    ) -> Option<ContractChange> {
+        if let Some((output_index, output)) = self.output.as_ref() {
+            let new_storage: HashMap<H256, H256> = self
+                .tree
+                .store()
+                .leaves_map()
+                .values()
+                .map(|leaf| (smth256_to_h256(&leaf.key), smth256_to_h256(&leaf.value)))
+                .collect();
+            let tx_origin = self.programs[0].program.tx_origin.clone();
+            let capacity: u64 = output.capacity().unpack();
+            Some(ContractChange {
+                tx_origin,
+                address: address.clone(),
+                number,
+                tx_index,
+                output_index: *output_index as u32,
+                tx_hash: tx_hash.clone(),
+                new_storage,
+                logs: self.logs.clone(),
+                capacity,
+                is_create: self.is_create(),
+            })
+        } else {
+            None
+        }
+    }
+}
+
+impl ContractExtractor {
+    pub fn init(
+        run_config: RunConfig,
+        tx_hash: H256,
+        tx_index: u32,
+        witnesses: Vec<JsonBytes>,
+        mut script_groups: HashMap<ContractAddress, ContractInfo>,
+    ) -> Result<Option<ContractExtractor>, String> {
+        let mut tx_origin = EoaAddress::default();
+        let mut entrance_contract = None;
+        for (addr, info) in script_groups.iter_mut() {
+            let witness_index = if let Some((input_index, _)) = info.input {
+                input_index
+            } else if let Some((output_index, _)) = info.output {
+                output_index
+            } else {
+                panic!("Input/Output both empty");
+            };
+            let mut start = 0;
+            let raw_witness = witnesses[witness_index].as_bytes();
+            while let Some((offset, witness_data)) = WitnessData::load_from(&raw_witness[start..])?
+            {
+                if tx_origin == EoaAddress::default() {
+                    tx_origin = witness_data.program.tx_origin.clone();
+                }
+                if tx_origin != witness_data.program.tx_origin {
+                    panic!("multiple tx_origin in one transaction");
+                }
+                if !witness_data.signature.iter().all(|byte| *byte == 0) {
+                    if entrance_contract.is_some() {
+                        panic!("Multiple entrance contract");
+                    }
+                    entrance_contract = Some(addr.clone());
+                }
+                info.programs.push(witness_data);
+                start += offset;
+            }
+        }
+
+        if entrance_contract.is_some() && !script_groups.is_empty() {
+            panic!("Invalid transaction");
+        }
+
+        Ok(entrance_contract.map(|entrance_contract| {
+            let current_contract = entrance_contract.clone();
+            ContractExtractor {
+                run_config,
+                tx_hash,
+                tx_index,
+                tx_origin,
+                entrance_contract,
+                current_contract,
+                script_groups,
+            }
+        }))
+    }
+
+    pub fn run(&mut self) -> Result<(), Box<dyn StdError>> {
+        let entrance_contract = self.entrance_contract.clone();
+        self.run_with(&entrance_contract).map(|_| ())
+    }
+
+    pub fn run_with(&mut self, contract: &ContractAddress) -> Result<Bytes, Box<dyn StdError>> {
+        self.current_contract = contract.clone();
+        let (tree_clone, program_data) = {
+            let info = self
+                .script_groups
+                .get(contract)
+                .ok_or_else(|| format!("No such contract to run: {:x}", contract.0))?;
+            let tree_clone = SparseMerkleTree::new(*info.tree.root(), info.tree.store().clone());
+            let program_data = info.current_program().program_data();
+            (tree_clone, program_data)
+        };
+        let config = Config::from(&self.run_config);
+        let result = match run_with_context(&config, &tree_clone, &program_data, self) {
+            Ok(result) => result,
+            Err(err) => {
+                log::warn!("Error: {:?}", err);
+                return Err(err);
+            }
+        };
+        let info = self
+            .script_groups
+            .get_mut(contract)
+            .ok_or_else(|| format!("No such contract to run: {:x}", contract.0))?;
+        let return_data = info.current_program().return_data.clone();
+        result.commit(&mut info.tree).unwrap();
+        info.program_index += 1;
+        Ok(return_data)
+    }
+
+    pub fn get_contract_changes(&self, number: u64) -> Vec<ContractChange> {
+        self.script_groups
+            .iter()
+            .filter_map(|(addr, info)| info.get_change(addr, number, self.tx_index, &self.tx_hash))
+            .collect()
+    }
+    pub fn get_created_contracts(&self) -> Vec<ContractMeta> {
+        self.script_groups
+            .iter()
+            .filter_map(|(addr, info)| info.get_meta(addr, &self.tx_hash))
+            .collect()
+    }
+    pub fn get_destructed_contracts(&self) -> Vec<ContractAddress> {
+        self.script_groups
+            .values()
+            .filter_map(|info| info.selfdestruct().cloned())
+            .map(ContractAddress)
+            .collect()
+    }
+}
+
+impl<Mac: SupportMachine> RunContext<Mac> for ContractExtractor {
+    fn ecall(&mut self, machine: &mut Mac) -> Result<bool, VMError> {
+        let code = machine.registers()[A7].to_u64();
+        match code {
+            // return
+            3075 => Ok(true),
+            // LOG{0,1,2,3,4}
+            3076 => {
+                let data_address = machine.registers()[A0].to_u64();
+                let data_length = machine.registers()[A1].to_u32();
+                let data = vm_load_data(machine, data_address, data_length)?;
+                self.script_groups
+                    .get_mut(&self.current_contract)
+                    .unwrap()
+                    .logs
+                    .push(parse_log(&data[..]).unwrap());
+                Ok(true)
+            }
+            // SELFDESTRUCT
+            3077 => Ok(true),
+            // CALL
+            3078 => {
+                let mut msg_data_address = machine.registers()[A0].to_u64();
+                let kind_value: u8 = vm_load_u8(machine, msg_data_address)?;
+                msg_data_address += 1;
+                let _flags: u32 = vm_load_u32(machine, msg_data_address)?;
+                msg_data_address += 4;
+                let _depth: i32 = vm_load_i32(machine, msg_data_address)?;
+                msg_data_address += 4;
+                let _gas: i64 = vm_load_i64(machine, msg_data_address)?;
+                msg_data_address += 8;
+                let destination: H160 = vm_load_h160(machine, msg_data_address)?;
+                msg_data_address += 20;
+                let _sender: H160 = vm_load_h160(machine, msg_data_address)?;
+                msg_data_address += 20;
+                let input_size: u32 = vm_load_u32(machine, msg_data_address)?;
+                msg_data_address += 4;
+                let _input_data: Vec<u8> = vm_load_data(machine, msg_data_address, input_size)?;
+                msg_data_address += input_size as u64;
+                let _value: H256 = vm_load_h256(machine, msg_data_address)?;
+
+                let kind = CallKind::try_from(kind_value).unwrap();
+                let destination = ContractAddress(destination);
+
+                let saved_current_contract = self.current_contract.clone();
+                let return_data = self
+                    .run_with(&destination)
+                    .map_err(|_err| VMError::Unexpected)?;
+                let create_address = if kind == CallKind::CREATE {
+                    destination
+                } else {
+                    ContractAddress(H160::default())
+                };
+                self.current_contract = saved_current_contract;
+
+                // Store return_data to VM memory
+                let result_data_address = machine.registers()[A0].to_u64();
+                let mut result_data = BytesMut::default();
+                result_data.put(&(return_data.len() as u32).to_le_bytes()[..]);
+                result_data.put(return_data.as_ref());
+                result_data.put(create_address.0.as_bytes());
+                machine
+                    .memory_mut()
+                    .store_bytes(result_data_address, result_data.as_ref())?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
 }

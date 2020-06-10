@@ -224,10 +224,11 @@ impl Loader {
                 Vec::new()
             };
             return Ok(ContractChange {
-                sender: value.sender,
+                tx_origin: value.tx_origin,
                 address,
                 tx_hash: value.tx_hash,
                 new_storage: value.new_storage.into_iter().collect(),
+                capacity: value.capacity,
                 is_create: value.is_create,
                 number,
                 tx_index,
