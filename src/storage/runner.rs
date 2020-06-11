@@ -154,12 +154,6 @@ impl ContractInput {
     pub fn capacity(&self) -> u64 {
         self.output.capacity().unpack()
     }
-    pub fn type_script(&self) -> Option<Script> {
-        self.output.type_().to_opt()
-    }
-    pub fn lock_script(&self) -> Script {
-        self.output.lock()
-    }
 }
 
 pub struct CallRecord {
@@ -277,17 +271,8 @@ impl ContractInfo {
         self.call_records.push(CallRecord::new(program));
     }
 
-    pub fn current_program(&self) -> &Program {
-        &self.current_record().program
-    }
-    pub fn current_logs(&self) -> &Vec<Bytes> {
-        &self.current_record().logs
-    }
     pub fn current_return_data(&self) -> &Bytes {
         &self.current_record().return_data
-    }
-    pub fn current_run_proof(&self) -> &Bytes {
-        &self.current_record().run_proof
     }
     pub fn current_record(&self) -> &CallRecord {
         self.call_records.last().unwrap()
@@ -315,6 +300,7 @@ impl CsalRunContext {
     pub fn build_tx(&mut self) -> Result<Transaction, Box<dyn StdError>> {
         let tx_fee = ONE_CKB;
         // Setup cell_deps
+        // TODO: fill load all inputs' headers as dependencies
         let cell_deps = vec![
             SIGHASH_CELL_DEP.clone(),
             self.run_config.type_dep.clone(),
@@ -659,17 +645,6 @@ impl CsalRunContext {
         self.get_contract_index(address)
             .map(|index| &self.contracts[index].1)
     }
-    pub fn get_contract_info_mut(
-        &mut self,
-        address: &ContractAddress,
-    ) -> Option<&mut ContractInfo> {
-        if let Some(index) = self.get_contract_index(address) {
-            Some(&mut self.contracts[index].1)
-        } else {
-            None
-        }
-    }
-
     pub fn current_contract_address(&self) -> &ContractAddress {
         &self.contracts[self.contract_index].0
     }

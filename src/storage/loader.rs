@@ -241,9 +241,9 @@ impl Loader {
 
     pub fn load_contract_changes(
         &self,
-        address: ContractAddress,
-        from_block: Option<u64>,
-        to_block: Option<u64>,
+        _address: ContractAddress,
+        _from_block: Option<u64>,
+        _to_block: Option<u64>,
     ) -> Result<Vec<ContractChange>, String> {
         Err(String::from("TODO: Loader::load_contract_changes"))
     }
@@ -327,6 +327,11 @@ impl Loader {
                 }
             };
             for (addr, _is_create) in block_delta.contracts {
+                if let Some(target_address) = address.as_ref() {
+                    if &addr != target_address {
+                        continue;
+                    }
+                }
                 let key_prefix_bytes = Bytes::from(&Key::ContractLogs {
                     address: addr.clone(),
                     number: Some(number),

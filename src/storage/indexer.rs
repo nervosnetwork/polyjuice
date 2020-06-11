@@ -499,11 +499,10 @@ impl Indexer {
 //   1. produce contract changes
 //   2. produce contract logs
 //   3. produce SELFDESTRUCT contracts
-struct ContractExtractor {
+pub struct ContractExtractor {
     run_config: RunConfig,
     tx_hash: H256,
     tx_index: u32,
-    tx_origin: EoaAddress,
     entrance_contract: ContractAddress,
     current_contract: ContractAddress,
 
@@ -512,7 +511,7 @@ struct ContractExtractor {
 }
 
 #[derive(Default)]
-struct ContractInfo {
+pub struct ContractInfo {
     input: Option<(usize, ContractChange)>,
     output: Option<(usize, packed::CellOutput)>,
     // Increased by 1 after ckb-vm run a program
@@ -648,7 +647,6 @@ impl ContractExtractor {
                 run_config,
                 tx_hash,
                 tx_index,
-                tx_origin,
                 entrance_contract,
                 current_contract,
                 script_groups,

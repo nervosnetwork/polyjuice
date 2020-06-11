@@ -1,6 +1,6 @@
 use ckb_jsonrpc_types::{
-    BlockNumber, BlockView, CellOutputWithOutPoint, CellWithStatus, EpochNumber, EpochView,
-    HeaderView, OutPoint, Transaction, TransactionWithStatus,
+    BlockNumber, BlockView, CellWithStatus, EpochNumber, EpochView, HeaderView, OutPoint,
+    TransactionWithStatus,
 };
 use ckb_types::H256;
 
@@ -65,8 +65,6 @@ jsonrpc!(pub struct RawHttpRpcClient {
     pub fn get_block(&mut self, hash: H256) -> Option<BlockView>;
     pub fn get_block_by_number(&mut self, number: BlockNumber) -> Option<BlockView>;
     pub fn get_block_hash(&mut self, number: BlockNumber) -> Option<H256>;
-    pub fn get_cells_by_lock_hash(&mut self, lock_hash: H256, from: BlockNumber, to: BlockNumber) -> Vec<CellOutputWithOutPoint>;
-    pub fn get_current_epoch(&mut self) -> EpochView;
     pub fn get_epoch_by_number(&mut self, number: EpochNumber) -> Option<EpochView>;
     pub fn get_header(&mut self, hash: H256) -> Option<HeaderView>;
     pub fn get_header_by_number(&mut self, number: BlockNumber) -> Option<HeaderView>;
@@ -76,7 +74,6 @@ jsonrpc!(pub struct RawHttpRpcClient {
     pub fn get_transaction(&mut self, hash: H256) -> Option<TransactionWithStatus>;
 
     // Pool
-    pub fn send_transaction(&mut self, tx: Transaction) -> H256;
 });
 
 pub struct HttpRpcClient {
@@ -99,9 +96,6 @@ impl HttpRpcClient {
     pub fn url(&self) -> &str {
         self.url.as_str()
     }
-    pub fn client(&mut self) -> &mut RawHttpRpcClient {
-        &mut self.client
-    }
 }
 
 impl HttpRpcClient {
@@ -117,21 +111,6 @@ impl HttpRpcClient {
     pub fn get_block_hash(&mut self, number: u64) -> Result<Option<H256>, String> {
         self.client
             .get_block_hash(BlockNumber::from(number))
-            .map_err(|err| err.to_string())
-    }
-    pub fn get_cells_by_lock_hash(
-        &mut self,
-        lock_hash: H256,
-        from: u64,
-        to: u64,
-    ) -> Result<Vec<CellOutputWithOutPoint>, String> {
-        self.client
-            .get_cells_by_lock_hash(lock_hash, BlockNumber::from(from), BlockNumber::from(to))
-            .map_err(|err| err.to_string())
-    }
-    pub fn get_current_epoch(&mut self) -> Result<EpochView, String> {
-        self.client
-            .get_current_epoch()
             .map_err(|err| err.to_string())
     }
     pub fn get_epoch_by_number(&mut self, number: u64) -> Result<Option<EpochView>, String> {
@@ -168,13 +147,6 @@ impl HttpRpcClient {
     pub fn get_transaction(&mut self, hash: H256) -> Result<Option<TransactionWithStatus>, String> {
         self.client
             .get_transaction(hash)
-            .map_err(|err| err.to_string())
-    }
-
-    // Pool
-    pub fn send_transaction(&mut self, tx: Transaction) -> Result<H256, String> {
-        self.client
-            .send_transaction(tx)
             .map_err(|err| err.to_string())
     }
 }

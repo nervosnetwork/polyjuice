@@ -1,4 +1,3 @@
-use ckb_hash::blake2b_256;
 use ckb_simple_account_layer::{CkbBlake2bHasher, Config};
 use ckb_types::{
     bytes::{BufMut, Bytes, BytesMut},
@@ -8,7 +7,6 @@ use ckb_types::{
     H160, H256,
 };
 use ckb_vm::{Error as VMError, Memory, Register, SupportMachine};
-use secp256k1::recovery::{RecoverableSignature, RecoveryId};
 use serde::{Deserialize, Serialize};
 use sparse_merkle_tree::{default_store::DefaultStore, SparseMerkleTree, H256 as SmtH256};
 use std::collections::HashMap;
@@ -459,42 +457,6 @@ impl WitnessData {
         buf.put(self.return_data.as_ref());
         buf.put(self.selfdestruct.clone().unwrap_or_default().as_bytes());
         buf.freeze()
-    }
-
-    /// unsigned_data = tx_hash ++ program.len() ++ program ++ run_proof
-    pub fn unsigned_data(&self, tx_hash: &H256) -> Bytes {
-        let program_data = self.program_data();
-        let mut data = BytesMut::default();
-        data.put(tx_hash.as_bytes());
-        data.put(&(program_data.len() as u32).to_le_bytes()[..]);
-        data.put(&[0u8; 65][..]);
-        data.put(&program_data.as_ref()[65..]);
-        data.put(self.run_proof.as_ref());
-        data.freeze()
-    }
-
-    pub fn secp_message(&self, tx_hash: &H256) -> Result<secp256k1::Message, String> {
-        let unsigned_data = self.unsigned_data(tx_hash);
-        secp256k1::Message::from_slice(&blake2b_256(&unsigned_data)[..])
-            .map_err(|err| err.to_string())
-    }
-
-    pub fn recover_pubkey(&self, tx_hash: &H256) -> Result<secp256k1::PublicKey, String> {
-        let message = self.secp_message(tx_hash)?;
-        let recov_id =
-            RecoveryId::from_i32(self.signature[64] as i32).map_err(|err| err.to_string())?;
-        let signature = RecoverableSignature::from_compact(&self.signature[0..64], recov_id)
-            .map_err(|err| err.to_string())?;
-        SECP256K1
-            .recover(&message, &signature)
-            .map_err(|err| err.to_string())
-    }
-
-    pub fn recover_sender(&self, tx_hash: &H256) -> Result<H160, String> {
-        let pubkey = self.recover_pubkey(tx_hash)?;
-        let hash = H160::from_slice(&blake2b_256(&pubkey.serialize()[..])[0..20])
-            .expect("Generate hash(H160) from pubkey failed");
-        Ok(hash)
     }
 }
 
