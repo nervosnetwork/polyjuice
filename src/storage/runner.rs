@@ -130,7 +130,7 @@ pub struct ContractInfo {
     pub input: Option<ContractInput>,
     pub selfdestruct: Option<Bytes>,
     // (program, logs, return_data, run_proof)
-    call_records: Vec<CallRecord>,
+    execute_records: Vec<ExecuteRecord>,
 }
 
 #[derive(Clone)]
@@ -156,7 +156,7 @@ impl ContractInput {
     }
 }
 
-pub struct CallRecord {
+pub struct ExecuteRecord {
     // Initial set
     pub program: Program,
     // Update in syscall
@@ -167,9 +167,9 @@ pub struct CallRecord {
     pub run_proof: Bytes,
 }
 
-impl CallRecord {
-    pub fn new(program: Program) -> CallRecord {
-        CallRecord {
+impl ExecuteRecord {
+    pub fn new(program: Program) -> ExecuteRecord {
+        ExecuteRecord {
             program,
             logs: Vec::new(),
             return_data: Bytes::default(),
@@ -177,13 +177,18 @@ impl CallRecord {
         }
     }
 
-    pub fn witness_data(&self) -> WitnessData {
+    pub fn witness_data(&self, first_program: bool) -> WitnessData {
+        // This optmize is for reducing witness size by remove duplicated code field
+        let mut program = self.program.clone();
+        if !first_program {
+            program.code = Bytes::default();
+        }
         WitnessData {
             signature: Bytes::from(vec![0u8; 65]),
-            program: self.program.clone(),
+            program,
             return_data: self.return_data.clone(),
-            run_proof: self.run_proof.clone(),
             selfdestruct: None,
+            run_proof: self.run_proof.clone(),
         }
     }
 }
@@ -197,7 +202,7 @@ impl ContractInfo {
             input,
             tree,
             code: Bytes::default(),
-            call_records: Vec::new(),
+            execute_records: Vec::new(),
             selfdestruct: None,
         }
     }
@@ -217,13 +222,13 @@ impl ContractInfo {
     }
 
     pub fn return_data(&self) -> Bytes {
-        self.call_records[self.call_records.len() - 1]
+        self.execute_records[self.execute_records.len() - 1]
             .return_data
             .clone()
     }
 
     pub fn get_logs(&self) -> Result<Vec<(Vec<H256>, Bytes)>, String> {
-        self.call_records
+        self.execute_records
             .iter()
             .try_fold(Vec::new(), |mut all_logs, record| {
                 for log_data in &record.logs {
@@ -236,11 +241,12 @@ impl ContractInfo {
     // Serialize all call records to WitnessArgs
     pub fn witness_data(&self) -> WitnessArgs {
         let mut witness_data_vec: Vec<WitnessData> = self
-            .call_records
+            .execute_records
             .iter()
-            .map(|record| record.witness_data())
+            .enumerate()
+            .map(|(idx, record)| record.witness_data(idx == 0))
             .collect();
-        witness_data_vec[self.call_records.len() - 1].selfdestruct = self
+        witness_data_vec[self.execute_records.len() - 1].selfdestruct = self
             .selfdestruct
             .as_ref()
             .map(|data| H160::from_slice(data.as_ref()).unwrap());
@@ -261,25 +267,25 @@ impl ContractInfo {
     }
 
     pub fn is_create(&self) -> bool {
-        self.call_records[0].program.is_create()
+        self.execute_records[0].program.is_create()
     }
 
     pub fn add_record(&mut self, program: Program) {
         if !program.is_create() && self.code.is_empty() {
             self.code = program.code.clone();
         }
-        self.call_records.push(CallRecord::new(program));
+        self.execute_records.push(ExecuteRecord::new(program));
     }
 
     pub fn current_return_data(&self) -> &Bytes {
         &self.current_record().return_data
     }
-    pub fn current_record(&self) -> &CallRecord {
-        self.call_records.last().unwrap()
+    pub fn current_record(&self) -> &ExecuteRecord {
+        self.execute_records.last().unwrap()
     }
 
-    pub fn current_record_mut(&mut self) -> &mut CallRecord {
-        self.call_records.last_mut().unwrap()
+    pub fn current_record_mut(&mut self) -> &mut ExecuteRecord {
+        self.execute_records.last_mut().unwrap()
     }
 }
 

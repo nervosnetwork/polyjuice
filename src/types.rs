@@ -89,6 +89,7 @@ pub struct WitnessData {
     ///     data_3 = return_data.len() ++ return_data
     ///     program_data = data_1 ++ data_2 ++ data_3
     ///
+    ///     FIXME: update it
     ///     data_1 = tx_hash
     ///     data_2 = program_data.len() ++ program_data
     ///     data_3 = run_proof
@@ -437,6 +438,7 @@ impl WitnessData {
         }
     }
 
+    // The witness program item
     pub fn serialize(&self) -> Bytes {
         let mut buf = BytesMut::default();
         let program_data = self.program_data();
@@ -446,6 +448,7 @@ impl WitnessData {
         buf.freeze()
     }
 
+    // The data pass into execute_vm() in validator.h
     pub fn program_data(&self) -> Bytes {
         let mut buf = BytesMut::default();
         let program = self.program.serialize();
@@ -453,8 +456,11 @@ impl WitnessData {
         buf.put(self.signature.as_ref());
         buf.put(&(program.len() as u32).to_le_bytes()[..]);
         buf.put(program.as_ref());
+
+        // Return data
         buf.put(&(self.return_data.len() as u32).to_le_bytes()[..]);
         buf.put(self.return_data.as_ref());
+        // selfdestruct beneficiary: H160
         buf.put(self.selfdestruct.clone().unwrap_or_default().as_bytes());
         buf.freeze()
     }
@@ -709,8 +715,8 @@ mod test {
 
     #[test]
     fn test_serde_witness_data() {
-        let data = hex::decode("95010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000038010000000000000000000000c8328aabcd9b9e8e64fbc566c4385c3bdeb219d7fa36e4fb6bf83b0d4ff5ac34c10e1f56893c9e4edb00000060806040526004361060295760003560e01c806360fe47b114602f5780636d4ce63c14605b576029565b60006000fd5b60596004803603602081101560445760006000fd5b81019080803590602001909291905050506084565b005b34801560675760006000fd5b50606e6094565b6040518082815260200191505060405180910390f35b8060006000508190909055505b50565b6000600060005054905060a2565b9056fea26469706673582212204e58804e375d4a732a7b67cce8d8ffa904fa534d4555e655a433ce0a5e0d339f64736f6c634300060600332400000060fe47b100000000000000000000000000000000000000000000000000000000000000230000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000022010000004c").unwrap();
-        WitnessData::load_from(data.as_slice()).unwrap();
+        // let data = hex::decode("95010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000038010000000000000000000000c8328aabcd9b9e8e64fbc566c4385c3bdeb219d7fa36e4fb6bf83b0d4ff5ac34c10e1f56893c9e4edb00000060806040526004361060295760003560e01c806360fe47b114602f5780636d4ce63c14605b576029565b60006000fd5b60596004803603602081101560445760006000fd5b81019080803590602001909291905050506084565b005b34801560675760006000fd5b50606e6094565b6040518082815260200191505060405180910390f35b8060006000508190909055505b50565b6000600060005054905060a2565b9056fea26469706673582212204e58804e375d4a732a7b67cce8d8ffa904fa534d4555e655a433ce0a5e0d339f64736f6c634300060600332400000060fe47b100000000000000000000000000000000000000000000000000000000000000230000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000022010000004c").unwrap();
+        // WitnessData::load_from(data.as_slice()).unwrap();
 
         let run_proof = RunProofResult::default();
         let run_proof_data = run_proof.serialize_pure().unwrap();
@@ -727,7 +733,7 @@ mod test {
         };
         let program_data = witness_data1.program_data();
         let binary = run_proof.serialize(&program_data).unwrap();
-        let witness_data2 = WitnessData::load_from(binary.as_ref()).unwrap();
+        let witness_data2 = WitnessData::load_from(binary.as_ref()).unwrap().unwrap().1;
         assert_eq!(witness_data1, witness_data2);
     }
 }

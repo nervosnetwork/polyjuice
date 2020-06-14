@@ -233,13 +233,13 @@ fn main() -> Result<(), String> {
                 let mut entrance_witness = None;
                 let mut unsigned_data = BytesMut::default();
                 unsigned_data.put(tx_hash.as_bytes());
+                let mut output_witnesses = Vec::new();
                 for (idx, witness) in tx_receipt.tx.witnesses.iter().enumerate() {
                     let witness_args = packed::WitnessArgs::from_slice(witness.as_bytes())
                         .map_err(|err| err.to_string())?;
                     if let Some(raw_witness) = witness_args
                         .input_type()
                         .to_opt()
-                        .or_else(|| witness_args.output_type().to_opt())
                         .map(|witness_data| witness_data.raw_data())
                     {
                         if idx == 0 {
@@ -251,8 +251,26 @@ fn main() -> Result<(), String> {
                         } else {
                             unsigned_data.put(raw_witness.as_ref());
                         }
+                    } else if let Some(raw_witness) = witness_args
+                        .output_type()
+                        .to_opt()
+                        .map(|witness_data| witness_data.raw_data())
+                    {
+                        output_witnesses.push((idx, witness_args, raw_witness));
                     }
                 }
+                for (idx, witness_args, raw_witness) in output_witnesses {
+                    if idx == 0 {
+                        entrance_witness = Some((witness_args, raw_witness.clone()));
+                        let mut raw_witness = raw_witness.as_ref().to_vec();
+                        // 4 bytes is for program length (u32)
+                        raw_witness[4..4 + 65].copy_from_slice(&[0u8; 65][..]);
+                        unsigned_data.put(&raw_witness[..]);
+                    } else {
+                        unsigned_data.put(raw_witness.as_ref());
+                    }
+                }
+
                 let (entrance_witness_args, entrance_raw_witness) =
                     entrance_witness.ok_or_else(|| String::from("No entrance witness found"))?;
                 let message = secp256k1::Message::from_slice(&blake2b_256(&unsigned_data)[..])
