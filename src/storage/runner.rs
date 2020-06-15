@@ -165,6 +165,8 @@ pub struct ExecuteRecord {
     pub return_data: Bytes,
     // Update after run_with_context
     pub run_proof: Bytes,
+
+    pub calls: Vec<(ContractAddress, u32)>,
 }
 
 impl ExecuteRecord {
@@ -174,6 +176,7 @@ impl ExecuteRecord {
             logs: Vec::new(),
             return_data: Bytes::default(),
             run_proof: Bytes::default(),
+            calls: Vec::new(),
         }
     }
 
@@ -188,6 +191,7 @@ impl ExecuteRecord {
             program,
             return_data: self.return_data.clone(),
             selfdestruct: None,
+            calls: self.calls.clone(),
             run_proof: self.run_proof.clone(),
         }
     }
@@ -275,6 +279,10 @@ impl ContractInfo {
             self.code = program.code.clone();
         }
         self.execute_records.push(ExecuteRecord::new(program));
+    }
+
+    pub fn get_last_call(&self) -> u32 {
+        (self.execute_records.len() - 1) as u32
     }
 
     pub fn current_return_data(&self) -> &Bytes {
@@ -741,12 +749,20 @@ impl<Mac: SupportMachine> RunContext<Mac> for CsalRunContext {
                     depth: depth as u32,
                     tx_origin: self.tx_origin.clone(),
                     sender,
-                    destination,
+                    destination: destination.clone(),
                     code,
                     input,
                 };
                 let saved_contract_index = self.contract_index;
                 self.run(program).map_err(|_err| VMError::Unexpected)?;
+                let dest_program_index = self
+                    .get_contract_info(&destination)
+                    .expect("get contract info")
+                    .get_last_call();
+                self.current_contract_info_mut()
+                    .current_record_mut()
+                    .calls
+                    .push((destination, dest_program_index));
                 let return_data = self.current_contract_info().current_return_data().clone();
                 let create_address = if kind == CallKind::CREATE {
                     self.current_contract_address().clone()

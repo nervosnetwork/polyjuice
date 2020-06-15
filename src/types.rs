@@ -102,6 +102,9 @@ pub struct WitnessData {
     pub return_data: Bytes,
     /// The call's selfdestruct target
     pub selfdestruct: Option<H160>,
+    /// For verify every contract have exact number of programs in specific
+    /// positions
+    pub calls: Vec<(ContractAddress, u32)>,
     /// Provide storage diff and diff proofs.
     pub run_proof: Bytes,
 }
@@ -376,7 +379,7 @@ impl TryFrom<u8> for CallKind {
 impl WitnessData {
     pub fn load_from(data: &[u8]) -> Result<Option<(usize, WitnessData)>, String> {
         let mut offset = 0;
-        let (signature, program, return_data, selfdestruct) = {
+        let (signature, program, return_data, selfdestruct, calls) = {
             let program_data = load_var_slice(data, &mut offset)?;
             if program_data.is_empty() {
                 // The end of all programs (just like '\0' of C string)
@@ -397,11 +400,19 @@ impl WitnessData {
             } else {
                 Some(selfdestruct_target)
             };
+            let mut calls = Vec::new();
+            let calls_len = load_u32(program_data, &mut inner_offset)?;
+            for _ in 0..calls_len {
+                let contract_address = load_h160(program_data, &mut inner_offset)?;
+                let program_index = load_u32(program_data, &mut inner_offset)?;
+                calls.push((ContractAddress(contract_address), program_index));
+            }
             (
                 Bytes::from(signature[..].to_vec()),
                 program,
                 Bytes::from(return_data.to_vec()),
                 selfdestruct,
+                calls,
             )
         };
 
@@ -424,6 +435,7 @@ impl WitnessData {
             return_data,
             selfdestruct,
             run_proof,
+            calls,
         };
         Ok(Some((end, witness_data)))
     }
@@ -435,6 +447,7 @@ impl WitnessData {
             return_data: Bytes::default(),
             selfdestruct: None,
             run_proof: Bytes::default(),
+            calls: Vec::new(),
         }
     }
 
@@ -462,6 +475,12 @@ impl WitnessData {
         buf.put(self.return_data.as_ref());
         // selfdestruct beneficiary: H160
         buf.put(self.selfdestruct.clone().unwrap_or_default().as_bytes());
+        // calls: Vec<(H160, u32)>
+        buf.put(&(self.calls.len() as u32).to_le_bytes()[..]);
+        for (contract_address, program_index) in &self.calls {
+            buf.put(contract_address.0.as_bytes());
+            buf.put(&program_index.to_le_bytes()[..]);
+        }
         buf.freeze()
     }
 }
@@ -700,6 +719,7 @@ pub fn parse_log(raw: &[u8]) -> Result<(Vec<H256>, Bytes), String> {
 mod test {
     use super::*;
     use ckb_simple_account_layer::RunProofResult;
+    use ckb_types::h160;
 
     #[test]
     fn test_serde_program() {
@@ -730,6 +750,10 @@ mod test {
             return_data: Bytes::from("return data"),
             selfdestruct: None,
             run_proof: Bytes::from(run_proof_data),
+            calls: vec![
+                (ContractAddress(h160!("0x33")), 0),
+                (ContractAddress(h160!("0x44")), 3),
+            ],
         };
         let program_data = witness_data1.program_data();
         let binary = run_proof.serialize(&program_data).unwrap();
