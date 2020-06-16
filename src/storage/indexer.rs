@@ -519,19 +519,24 @@ pub struct ContractInfo {
     programs: Vec<WitnessData>,
     // Updated by ckb-vm
     logs: Vec<(Vec<H256>, Bytes)>,
+    selfdestruct: Option<Bytes>,
     // Updated by ckb-vm
     tree: SparseMerkleTree<CkbBlake2bHasher, SmtH256, DefaultStore<SmtH256>>,
 }
 
 impl ContractInfo {
-    pub fn selfdestruct(&self) -> Option<&H160> {
+    pub fn selfdestruct(&self) -> Option<ContractAddress> {
         assert_eq!(
             self.output.is_none(),
             self.programs[self.programs.len() - 1]
                 .selfdestruct
                 .is_some(),
         );
-        self.programs[self.programs.len() - 1].selfdestruct.as_ref()
+        let last_program = &self.programs[self.programs.len() - 1];
+        last_program
+            .selfdestruct
+            .as_ref()
+            .map(|_| last_program.program.destination.clone())
     }
     pub fn is_create(&self) -> bool {
         self.input.is_none()
@@ -617,7 +622,19 @@ impl ContractExtractor {
                 panic!("Input/Output both empty");
             };
             let mut start = 0;
-            let raw_witness = witnesses[witness_index].as_bytes();
+            let witness_args = packed::WitnessArgs::from_slice(witnesses[witness_index].as_bytes())
+                .map_err(|err| err.to_string())?;
+            let raw_witness = witness_args
+                .input_type()
+                .to_opt()
+                .or_else(|| witness_args.output_type().to_opt())
+                .map(|witness_data| witness_data.raw_data())
+                .ok_or_else(|| {
+                    format!(
+                        "can not find raw witness data in witnesses[{}]",
+                        witness_index
+                    )
+                })?;
             while let Some((offset, witness_data)) = WitnessData::load_from(&raw_witness[start..])?
             {
                 if tx_origin == EoaAddress::default() {
@@ -637,7 +654,7 @@ impl ContractExtractor {
             }
         }
 
-        if entrance_contract.is_some() && !script_groups.is_empty() {
+        if entrance_contract.is_none() && !script_groups.is_empty() {
             panic!("Invalid transaction");
         }
 
@@ -703,8 +720,7 @@ impl ContractExtractor {
     pub fn get_destructed_contracts(&self) -> Vec<ContractAddress> {
         self.script_groups
             .values()
-            .filter_map(|info| info.selfdestruct().cloned())
-            .map(ContractAddress)
+            .filter_map(|info| info.selfdestruct())
             .collect()
     }
 }
@@ -713,6 +729,27 @@ impl<Mac: SupportMachine> RunContext<Mac> for ContractExtractor {
     fn ecall(&mut self, machine: &mut Mac) -> Result<bool, VMError> {
         let code = machine.registers()[A7].to_u64();
         match code {
+            // ckb_debug
+            2177 => {
+                let mut addr = machine.registers()[A0].to_u64();
+                let mut buffer = Vec::new();
+
+                loop {
+                    let byte = machine
+                        .memory_mut()
+                        .load8(&Mac::REG::from_u64(addr))?
+                        .to_u8();
+                    if byte == 0 {
+                        break;
+                    }
+                    buffer.push(byte);
+                    addr += 1;
+                }
+
+                let s = String::from_utf8(buffer).map_err(|_| VMError::ParseError)?;
+                log::debug!("ckb_debug: {}", s);
+                Ok(true)
+            }
             // return
             3075 => Ok(true),
             // LOG{0,1,2,3,4}
@@ -728,7 +765,16 @@ impl<Mac: SupportMachine> RunContext<Mac> for ContractExtractor {
                 Ok(true)
             }
             // SELFDESTRUCT
-            3077 => Ok(true),
+            3077 => {
+                let data_address = machine.registers()[A0].to_u64();
+                let data_length = machine.registers()[A1].to_u32();
+                let data = vm_load_data(machine, data_address, data_length)?;
+                self.script_groups
+                    .get_mut(&self.current_contract)
+                    .unwrap()
+                    .selfdestruct = Some(data.into());
+                Ok(true)
+            }
             // CALL
             3078 => {
                 let mut msg_data_address = machine.registers()[A0].to_u64();

@@ -62,10 +62,10 @@ def send_jsonrpc(method, params):
 def create_contract(binary, constructor_args="", sender=SENDER1):
     print("[create contract]:")
     print("  sender = {}".format(sender))
-    print("  binary = {}".format(binary))
-    print("    args = {}".format(constructor_args))
+    print("  binary = 0x{}".format(binary))
+    print("    args = 0x{}".format(constructor_args))
     result = send_jsonrpc("create", [sender, "0x{}{}".format(binary, constructor_args)])
-    print("  >> created address = {}".format(result["contract_address"]))
+    print("  >> created address = {}".format(result["entrance_contract"]))
     return result
 
 def call_contract(contract_address, args, is_static=False, sender=SENDER1):
@@ -89,7 +89,11 @@ def commit_tx(result, action_name, privkey_path=privkey1_path):
     with open(result_path, "w") as f:
         json.dump(result, f, indent=4)
     tx_path = os.path.join(target_dir, "{}-tx.json".format(action_name))
+    tx_raw_path = os.path.join(target_dir, "{}-raw-tx.json".format(action_name))
+    tx_moack_path = os.path.join(target_dir, "{}-mock-tx.json".format(action_name))
     run_cmd("polyjuice-ng sign-tx -k {} -t {} -o {}".format(privkey_path, result_path, tx_path))
+    run_cmd("cat {} | jq .transaction > {}".format(tx_path, tx_raw_path))
+    run_cmd("ckb-cli mock-tx dump --tx-file {} --output-file {}".format(tx_raw_path, tx_moack_path))
     run_cmd("ckb-cli tx send --tx-file {} --skip-check".format(tx_path))
     mine_blocks()
 
@@ -97,11 +101,12 @@ def create_contract_by_name(name, constructor_args=""):
     result = create_contract(contracts_binary[name], constructor_args)
     action_name = "create-{}".format(name)
     commit_tx(result, action_name)
-    return result["contract_address"]
+    return result["entrance_contract"]
 
 
 def test_simple_storage():
     contract_name = SIMPLE_STORAGE
+    print("[Start]: {}\n".format(contract_name))
     contract_address = create_contract_by_name(contract_name)
 
     for args in [
@@ -116,6 +121,7 @@ def test_simple_storage():
 
 def test_log_events():
     contract_name = LOG_EVENTS
+    print("[Start]: {}\n".format(contract_name))
     contract_address = create_contract_by_name(contract_name)
 
     args = "0x51973ec9"
@@ -126,6 +132,7 @@ def test_log_events():
 
 def test_self_destruct():
     contract_name = SELF_DESTRUCT
+    print("[Start]: {}\n".format(contract_name))
     contract_address = create_contract_by_name(contract_name, "000000000000000000000000b2e61ff569acf041b3c2c17724e2379c581eeac3")
 
     args = "0xae8421e1"
@@ -137,6 +144,7 @@ def test_self_destruct():
 
 def test_erc20():
     contract_name = ERC20
+    print("[Start]: {}\n".format(contract_name))
     contract_address = create_contract_by_name(contract_name)
 
     for (args, is_static, return_data) in [
@@ -185,9 +193,9 @@ def test_erc20():
 
 
 def main():
-    # test_simple_storage()
-    # test_log_events()
-    # test_self_destruct()
+    test_simple_storage()
+    test_log_events()
+    test_self_destruct()
     test_erc20()
 
 if __name__ == "__main__":

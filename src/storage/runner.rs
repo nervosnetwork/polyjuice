@@ -256,8 +256,11 @@ impl ContractInfo {
             .map(|data| H160::from_slice(data.as_ref()).unwrap());
         let mut data = BytesMut::default();
         for witness_data in witness_data_vec {
+            let x = witness_data.serialize();
+            log::debug!("put witness_data({}): {}", x.len(), hex::encode(x.as_ref()));
             data.put(witness_data.serialize().as_ref());
         }
+        log::debug!("put 0");
         // The end of all programs (just like '\0' of C string)
         data.put(&0u32.to_le_bytes()[..]);
         let data = BytesOpt::new_builder()
@@ -674,11 +677,33 @@ impl<Mac: SupportMachine> RunContext<Mac> for CsalRunContext {
     fn ecall(&mut self, machine: &mut Mac) -> Result<bool, VMError> {
         let code = machine.registers()[A7].to_u64();
         match code {
+            // ckb_debug
+            2177 => {
+                let mut addr = machine.registers()[A0].to_u64();
+                let mut buffer = Vec::new();
+
+                loop {
+                    let byte = machine
+                        .memory_mut()
+                        .load8(&Mac::REG::from_u64(addr))?
+                        .to_u8();
+                    if byte == 0 {
+                        break;
+                    }
+                    buffer.push(byte);
+                    addr += 1;
+                }
+
+                let s = String::from_utf8(buffer).map_err(|_| VMError::ParseError)?;
+                log::debug!("ckb_debug: {}", s);
+                Ok(true)
+            }
             // return
             3075 => {
                 let data_address = machine.registers()[A0].to_u64();
                 let data_length = machine.registers()[A1].to_u32();
                 let data = vm_load_data(machine, data_address, data_length)?;
+                log::debug!("return_data: {}", hex::encode(&data));
                 let info = self.current_contract_info_mut();
                 info.current_record_mut().return_data = data.clone().into();
                 if info.is_create() {
