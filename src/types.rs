@@ -420,13 +420,13 @@ impl WitnessData {
         {
             // see: RunProofResult::serialize_pure()
             let read_values_len = load_u32(&data, &mut end)?;
-            offset += 64 * read_values_len as usize;
+            end += 64 * read_values_len as usize;
             let read_proof_len = load_u32(&data, &mut end)?;
-            offset += read_proof_len as usize;
+            end += read_proof_len as usize;
             let write_values_len = load_u32(&data, &mut end)?;
-            offset += 32 * write_values_len as usize;
+            end += 32 * write_values_len as usize;
             let write_old_proof_len = load_u32(&data, &mut end)?;
-            offset += write_old_proof_len as usize;
+            end += write_old_proof_len as usize;
         }
         let run_proof = Bytes::from(data[offset..end].to_vec());
         let witness_data = WitnessData {
@@ -738,7 +738,11 @@ mod test {
         // let data = hex::decode("95010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000038010000000000000000000000c8328aabcd9b9e8e64fbc566c4385c3bdeb219d7fa36e4fb6bf83b0d4ff5ac34c10e1f56893c9e4edb00000060806040526004361060295760003560e01c806360fe47b114602f5780636d4ce63c14605b576029565b60006000fd5b60596004803603602081101560445760006000fd5b81019080803590602001909291905050506084565b005b34801560675760006000fd5b50606e6094565b6040518082815260200191505060405180910390f35b8060006000508190909055505b50565b6000600060005054905060a2565b9056fea26469706673582212204e58804e375d4a732a7b67cce8d8ffa904fa534d4555e655a433ce0a5e0d339f64736f6c634300060600332400000060fe47b100000000000000000000000000000000000000000000000000000000000000230000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000022010000004c").unwrap();
         // WitnessData::load_from(data.as_slice()).unwrap();
 
-        let run_proof = RunProofResult::default();
+        let mut run_proof = RunProofResult::default();
+        run_proof.read_values = vec![(SmtH256::default(), SmtH256::default())];
+        run_proof.read_proof = Bytes::from("xxyyzz");
+        run_proof.write_values = vec![(SmtH256::default(), SmtH256::default(), SmtH256::default())];
+        run_proof.write_old_proof = Bytes::from("beef");
         let run_proof_data = run_proof.serialize_pure().unwrap();
         let witness_data1 = WitnessData {
             signature: Bytes::from([1u8; 65].to_vec()),
