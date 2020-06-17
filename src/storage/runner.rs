@@ -213,7 +213,19 @@ impl ContractInfo {
 
     // The storage tree root hash
     pub fn storage_root(&self) -> H256 {
-        smth256_to_h256(self.tree.root())
+        // FIXME: fix this later (SMT must ensure the consistency)
+        let mut tree: SparseMerkleTree<CkbBlake2bHasher, SmtH256, DefaultStore<SmtH256>> = Default::default();
+        let mut pairs = self.tree
+            .store()
+            .leaves_map()
+            .values()
+            .map(|item| (item.key, item.value))
+            .collect::<Vec<_>>();
+        pairs.sort_unstable_by_key(|(k, _)| *k);
+        for (key, value) in pairs {
+            tree.update(key, value).unwrap();
+        }
+        smth256_to_h256(tree.root())
     }
     // The contract code hash
     pub fn code_hash(&self) -> H256 {
@@ -256,8 +268,6 @@ impl ContractInfo {
             .map(|data| H160::from_slice(data.as_ref()).unwrap());
         let mut data = BytesMut::default();
         for witness_data in witness_data_vec {
-            let x = witness_data.serialize();
-            log::debug!("put witness_data({}): {}", x.len(), hex::encode(x.as_ref()));
             data.put(witness_data.serialize().as_ref());
         }
         log::debug!("put 0");
@@ -824,11 +834,11 @@ fn print_proof(proof: &RunProofResult) {
     log::debug!("read_proof: 0x{}", hex::encode(&proof.read_proof[..]));
     for (i, (key, old_value, new_value)) in proof.write_values.iter().enumerate() {
         log::debug!(
-            "write_values[{}]: {} => \n (old={}, new={})",
+            "write_values[{}]: \n {} => new = {}, old = {})",
             i,
             hex::encode(key.as_slice()),
+            hex::encode(new_value.as_slice()),
             hex::encode(old_value.as_slice()),
-            hex::encode(new_value.as_slice())
         );
     }
     log::debug!(

@@ -192,11 +192,19 @@ def test_erc20():
     print("[Finish]: {}\n".format(contract_name))
 
 
+def test_erc721_kitty_core():
+    contract_name = ERC721
+    print("[Start]: {}\n".format(contract_name))
+    contract_address = create_contract_by_name(contract_name)
+    print("[Finish]: {}\n".format(contract_name))
+
+
 def main():
     test_simple_storage()
     test_log_events()
     test_self_destruct()
     test_erc20()
+    test_erc721_kitty_core()
 
 if __name__ == "__main__":
     main()

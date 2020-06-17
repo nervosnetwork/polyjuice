@@ -137,7 +137,7 @@ pub struct Program {
     /// The call depth.
     pub depth: u32,
 
-    /// The transaction origin address (TODO: EoA sender address?)
+    /// The transaction origin address (EoA sender address)
     /// NOTE: There must only have one tx_origin in a CKB transaction, otherwise
     ///  it will be too complex.
     pub tx_origin: EoaAddress,
