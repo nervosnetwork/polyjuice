@@ -1,0 +1,65 @@
+language: rust
+rust: 1.40.0
+dist: xenial
+sudo: true
+cache:
+  cargo: true
+  timeout: 1024
+
+git:
+  depth: 2
+  submodules: true
+
+env:
+  global:
+    - RUST_BACKTRACE=full
+
+addons:
+  apt:
+    packages:
+      - autoconf
+      - flex
+      - bison
+      - texinfo
+      - libtool
+
+before_install:
+  - cargo sweep --version || travis_retry cargo install --git https://github.com/holmgr/cargo-sweep --rev 4770deda37a2203c783e301b8c0c895964e8971e
+  - cargo sweep -s
+
+before_script:
+  - if [ "$TRAVIS_OS_NAME" = "osx" ]; then ulimit -n 8192; fi
+
+script: make test
+
+before_cache:
+  - rm -rf ./target/release/incremental/
+  - rm -rf ./target/debug/incremental/
+  - cargo sweep -f
+
+matrix:
+  include:
+    # We don't run tests, linters and quck check in fork branch, since they will be covered in PR.
+    - name: Tests on macOS
+      if: 'tag IS NOT present AND (type = pull_request OR branch = master OR branch = develop)'
+      os: osx
+    - name: Tests on Linux
+      if: 'tag IS NOT present AND (type = pull_request OR branch = master OR branch = develop)'
+      os: linux
+    - name: Linters
+      env: CACHE_NAME=linters
+      if: 'tag IS NOT present AND (type = pull_request OR branch = master OR branch = develop)'
+      os: linux
+      install:
+        - cargo fmt --version || travis_retry rustup component add rustfmt
+        - cargo clippy --version || travis_retry rustup component add clippy
+      script:
+        - make fmt
+        - make clippy
+        - git diff --exit-code Cargo.lock
+    - name: PR Integration
+      if: 'tag IS NOT present AND (type = pull_request OR branch = master OR branch = develop)'
+      os: linux
+      script:
+        - make integration
+        - cd c && make all-via-docker

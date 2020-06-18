@@ -15,7 +15,7 @@ SENDER2 = "0x89750ca24e601604336276291d8b70280804d783"
 ADDRESS2 = "ckt1qyqgjagv5f8xq9syxd38v2ga3dczszqy67psu2y8r4"
 SENDER2_PRIVKEY = "3066aa42bfa95c6d033edfad9d1efb871991fd26f56270fedc171559823bee77"
 target_dir = sys.argv[1]
-ckb_bin_path = sys.argv[3]
+ckb_bin_path = sys.argv[2]
 ckb_dir = os.path.dirname(os.path.abspath(ckb_bin_path))
 script_dir = os.path.dirname(os.path.abspath(__file__))
 privkey1_path = os.path.join(target_dir, "{}.privkey".format(SENDER1))
@@ -42,8 +42,8 @@ contracts_binary = {
     ERC721: open(os.path.join(script_dir, 'KittyCore.bin'), 'r').read().strip(),
 }
 
-if len(sys.argv) < 4:
-    print("USAGE:\n    python {} <json-dir> <privkey-path> <ckb-binary-path>".format(sys.argv[0]))
+if len(sys.argv) < 3:
+    print("USAGE:\n    python {} <json-dir> <ckb-binary-path>".format(sys.argv[0]))
     exit(-1)
 
 def send_jsonrpc(method, params):
