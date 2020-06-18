@@ -214,8 +214,10 @@ impl ContractInfo {
     // The storage tree root hash
     pub fn storage_root(&self) -> H256 {
         // FIXME: fix this later (SMT must ensure the consistency)
-        let mut tree: SparseMerkleTree<CkbBlake2bHasher, SmtH256, DefaultStore<SmtH256>> = Default::default();
-        let mut pairs = self.tree
+        let mut tree: SparseMerkleTree<CkbBlake2bHasher, SmtH256, DefaultStore<SmtH256>> =
+            Default::default();
+        let mut pairs = self
+            .tree
             .store()
             .leaves_map()
             .values()

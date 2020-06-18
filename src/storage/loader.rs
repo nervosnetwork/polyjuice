@@ -19,29 +19,6 @@ use crate::types::{
     SIGHASH_TYPE_HASH,
 };
 
-// Query Interface
-// ===============
-// ## Contract Account
-//     * getBalance(addr: ContractAddress, number: Option<BlockNumber>)
-//           -> Capacity
-//     * getStorageAt(addr: ContractAddress, position: U256, number: Option<BlockNumber>)
-//           -> U256
-//     * getCode(addr: ContractAddress)
-//           -> (Bytes, OutPoint)
-//     * call(addr: ContractAddress, input_data: Bytes)
-//           -> Bytes
-// ## Transaction
-//     * generateTransaction(addr: Option<ContractAddress>, input_data: Bytes)
-//           -> CkbTransaction
-//     * sendRawTransaction(tx: CkbTransaction)
-//           -> H256
-//     * getTransactionByHash(tx_hash: H256)
-//           -> CkbTransaction
-//     * getTransactionReceipt(tx_hash: H256)
-//           -> TransactionReceipt
-//     * getLogs(filter: LogFilter)
-//               -> Vec<LogEntry>
-
 #[derive(Clone)]
 pub struct Loader {
     pub db: Arc<DB>,
@@ -237,15 +214,6 @@ impl Loader {
             });
         }
         Err(String::from("Latest contract change not found"))
-    }
-
-    pub fn load_contract_changes(
-        &self,
-        _address: ContractAddress,
-        _from_block: Option<u64>,
-        _to_block: Option<u64>,
-    ) -> Result<Vec<ContractChange>, String> {
-        Err(String::from("TODO: Loader::load_contract_changes"))
     }
 
     pub fn load_contract_meta_list(
