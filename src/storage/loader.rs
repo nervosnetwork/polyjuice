@@ -123,8 +123,8 @@ impl Loader {
 
         if total_capacity < min_capacity {
             Err(format!(
-                "Not enough live cells: total capacity = {}",
-                total_capacity
+                "Not enough live cells: sender: {:x}, total capacity = {}",
+                sender.0, total_capacity
             ))
         } else {
             Ok((live_cells, total_capacity))
@@ -269,7 +269,7 @@ impl Loader {
                 destructed: value.destructed,
             })
         } else {
-            Err(format!("Contract meta not found: {:?}", address))
+            Err(format!("Contract meta not found: {}", address.0))
         }
     }
 

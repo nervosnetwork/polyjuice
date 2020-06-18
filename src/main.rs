@@ -337,7 +337,6 @@ fn main() -> Result<(), String> {
 
             // Replace transaction in --tx-file
             let cli_tx_content = fs::read_to_string(tx_path_str).unwrap();
-            println!("tx: {}", cli_tx_content);
             let mut cli_tx: serde_json::Value = serde_json::from_str(&cli_tx_content).unwrap();
             cli_tx["transaction"] = tx_body;
             fs::write(

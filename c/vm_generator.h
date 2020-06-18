@@ -8,6 +8,23 @@
 #define _CSAL_SELFDESTRUCT_SYSCALL_NUMBER 3077
 #define _CSAL_CALL_SYSCALL_NUMBER 3078
 
+static char debug_buffer[64 * 1024];
+static void debug_print_data(const char *prefix,
+                             const uint8_t *data,
+                             uint32_t data_len) {
+  int offset = 0;
+  offset += sprintf(debug_buffer, "%s 0x", prefix);
+  for (size_t i = 0; i < data_len; i++) {
+    offset += sprintf(debug_buffer + offset, "%02x", data[i]);
+  }
+  debug_buffer[offset] = '\0';
+  ckb_debug(debug_buffer);
+}
+static void debug_print_int(const char *prefix, int ret) {
+  sprintf(debug_buffer, "%s => %d", prefix, ret);
+  ckb_debug(debug_buffer);
+}
+
 int csal_return(const uint8_t *data, uint32_t data_length) {
   return syscall(_CSAL_RETURN_SYSCALL_NUMBER, data, data_length, 0, 0, 0, 0);
 }
@@ -105,6 +122,11 @@ struct evmc_result call(struct evmc_host_context* context,
   uint8_t msg_data[10 * 1024];
   uint8_t *msg_ptr = msg_data;
 
+  debug_print_int("kind", (int)msg->kind);
+  debug_print_data("sender", msg->sender.bytes, 20);
+  debug_print_data("destination", msg->destination.bytes, 20);
+  debug_print_data("input data", msg->input_data, msg->input_size);
+
   *msg_ptr = (uint8_t)msg->kind;
   msg_ptr += 1;
   memcpy(msg_ptr, ((uint8_t *)&msg->flags), 4);
@@ -140,7 +162,6 @@ struct evmc_result call(struct evmc_host_context* context,
   evmc_address create_address{};
   memcpy(&create_address.bytes, result_ptr, 20);
   result_ptr += 20;
-
 
   struct evmc_result res = { EVMC_SUCCESS, msg->gas, output_data, output_size, release_result, create_address };
   memset(res.padding, 0, 4);

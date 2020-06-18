@@ -176,7 +176,7 @@ impl Indexer {
                     }
                     Ok(None) => {
                         // Reach the tip, wait 200ms for next block
-                        sleep(Duration::from_millis(100));
+                        sleep(Duration::from_millis(50));
                         // TODO: clean up OLD block delta here (before tip-200)
                         continue;
                     }
@@ -529,6 +529,7 @@ pub struct ContractExtractor {
 pub struct ContractInfo {
     input: Option<(usize, ContractChange)>,
     output: Option<(usize, packed::CellOutput)>,
+    call_index: usize,
     // Increased by 1 after ckb-vm run a program
     program_index: usize,
     programs: Vec<WitnessData>,
@@ -717,6 +718,7 @@ impl ContractExtractor {
         let return_data = info.current_program().return_data.clone();
         result.commit(&mut info.tree).unwrap();
         info.program_index += 1;
+        info.call_index = 0;
         Ok(return_data)
     }
 
@@ -792,7 +794,7 @@ impl<Mac: SupportMachine> RunContext<Mac> for ContractExtractor {
             }
             // CALL
             3078 => {
-                let mut msg_data_address = machine.registers()[A0].to_u64();
+                let mut msg_data_address = machine.registers()[A1].to_u64();
                 let kind_value: u8 = vm_load_u8(machine, msg_data_address)?;
                 msg_data_address += 1;
                 let _flags: u32 = vm_load_u32(machine, msg_data_address)?;
@@ -812,8 +814,19 @@ impl<Mac: SupportMachine> RunContext<Mac> for ContractExtractor {
                 let _value: H256 = vm_load_h256(machine, msg_data_address)?;
 
                 let kind = CallKind::try_from(kind_value).unwrap();
-                let destination = ContractAddress(destination);
-
+                let destination = if kind == CallKind::CREATE {
+                    let info_mut = self
+                        .script_groups
+                        .get_mut(&self.current_contract)
+                        .expect("can not find current contract");
+                    let addr = info_mut.current_program().calls[info_mut.call_index]
+                        .0
+                        .clone();
+                    info_mut.call_index += 1;
+                    addr
+                } else {
+                    ContractAddress(destination)
+                };
                 let saved_current_contract = self.current_contract.clone();
                 let return_data = self
                     .run_with(&destination)

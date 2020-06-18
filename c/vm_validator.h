@@ -110,6 +110,8 @@ int call_record_load(call_record *record, const uint8_t *buf, const size_t buf_s
   record->destination = *(evmc_address *)buf;
   uint32_t index = *(uint32_t *)(buf + 20);
   record->program_index = (size_t)index;
+  debug_print_data("[call.destination]", record->destination.bytes, 20);
+  debug_print_int("[call.program_index]", record->program_index);
   return 0;
 }
 
@@ -216,7 +218,7 @@ void find_contract_info(contract_info **info,
       return;
     }
   }
-  ckb_debug("can not find contract info");
+  debug_print_data("can not find contract info", target->bytes, 20);
   return;
 }
 
@@ -445,11 +447,6 @@ int contract_info_call(const contract_info *sender_info,
     return -99;
   }
 
-  if (memcmp(msg->destination.bytes, dest_info->address.bytes, 20) != 0) {
-    ckb_debug("destination not match");
-    return -99;
-  }
-
   if (dest_program->kind == EVMC_CREATE) {
     if (dest_info->program_index != 0) {
       ckb_debug("CREATE must be first program");
@@ -470,8 +467,12 @@ int contract_info_call(const contract_info *sender_info,
       ckb_debug("CREATE input data must be NULL");
       return -99;
     }
-    memcpy(res->create_address.bytes, msg->destination.bytes, 20);
+    memcpy(res->create_address.bytes, call.destination.bytes, 20);
   } else {
+    if (memcmp(msg->destination.bytes, dest_info->address.bytes, 20) != 0) {
+      ckb_debug("destination not match");
+      return -99;
+    }
     /* call code is checked in it's own script group */
     if (dest_program->input_size == 0) {
       ckb_debug("CALL input size can not be zero");
@@ -586,7 +587,17 @@ struct evmc_result call(struct evmc_host_context* context,
     res.status_code = EVMC_REVERT;
     return res;
   }
-  find_contract_info(&dest_info, global_info_list, global_info_count, &msg->destination);
+
+  evmc_address destination{};
+  if (msg->kind == EVMC_CREATE) {
+    /* TODO: security check */
+    contract_program *program = sender_info->current_program;
+    call_record call = program->calls[program->call_index];
+    memcpy(destination.bytes, call.destination.bytes, 20);
+  } else {
+    memcpy(destination.bytes, msg->destination.bytes, 20);
+  }
+  find_contract_info(&dest_info, global_info_list, global_info_count, &destination);
   if (dest_info == NULL) {
     res.status_code = EVMC_REVERT;
     return res;
@@ -1088,7 +1099,7 @@ inline int verify_result(struct evmc_host_context* context,
   }
 
   contract_info *info = NULL;
-  find_contract_info(&info, global_info_list, global_info_count, &msg->destination);
+  find_contract_info(&info, global_info_list, global_info_count, &global_current_contract);
   if (info == NULL) {
     ckb_debug("can not found contract info");
     return -111;

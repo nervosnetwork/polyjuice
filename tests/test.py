@@ -39,6 +39,7 @@ LOG_EVENTS = "LogEvents"
 SELF_DESTRUCT = "SelfDestruct"
 ERC20 = "ERC20"
 ERC721 = "KittyCore"
+CREATE_CONTRACT = "CreateContract"
 
 contracts_binary = {
     SIMPLE_STORAGE: "60806040525b607b60006000508190909055505b610018565b60db806100266000396000f3fe60806040526004361060295760003560e01c806360fe47b114602f5780636d4ce63c14605b576029565b60006000fd5b60596004803603602081101560445760006000fd5b81019080803590602001909291905050506084565b005b34801560675760006000fd5b50606e6094565b6040518082815260200191505060405180910390f35b8060006000508190909055505b50565b6000600060005054905060a2565b9056fea26469706673582212204e58804e375d4a732a7b67cce8d8ffa904fa534d4555e655a433ce0a5e0d339f64736f6c63430006060033",
@@ -46,6 +47,7 @@ contracts_binary = {
     SELF_DESTRUCT: "608060405260405161013c38038061013c833981810160405260208110156100275760006000fd5b81019080805190602001909291905050505b80600060006101000a81548173ffffffffffffffffffffffffffffffffffffffff021916908373ffffffffffffffffffffffffffffffffffffffff1602179055505b50610081565b60ad8061008f6000396000f3fe608060405234801560105760006000fd5b5060043610602c5760003560e01c8063ae8421e114603257602c565b60006000fd5b6038603a565b005b600060009054906101000a900473ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff16ff5b56fea2646970667358221220ead2c0723dcc5bc6fe1848ffcc748528c4f0638575fdee75e2c972c60fa1ea2d64736f6c63430006060033",
     ERC20: open(os.path.join(script_dir, 'ERC20.bin'), 'r').read().strip(),
     ERC721: open(os.path.join(script_dir, 'KittyCore.bin'), 'r').read().strip(),
+    CREATE_CONTRACT: open(os.path.join(script_dir, 'CreateContract.bin'), 'r').read().strip(),
 }
 
 def send_jsonrpc(method, params):
@@ -88,6 +90,7 @@ def run_cmd(cmd):
 
 def mine_blocks(n=5):
     run_cmd("{} miner -C {} -l {}".format(ckb_bin_path, ckb_dir, n))
+    time.sleep(0.5)
 
 def commit_tx(result, action_name, privkey_path=privkey1_path):
     result_path = os.path.join(target_dir, "{}.json".format(action_name))
@@ -204,12 +207,20 @@ def test_erc721_kitty_core():
     print("[Finish]: {}\n".format(contract_name))
 
 
+def test_contract_create_contract():
+    contract_name = CREATE_CONTRACT
+    print("[Start]: {}\n".format(contract_name))
+    contract_address = create_contract_by_name(contract_name)
+    print("[Finish]: {}\n".format(contract_name))
+
 def main():
     test_simple_storage()
     test_log_events()
     test_self_destruct()
     test_erc20()
     test_erc721_kitty_core()
+    #  TODO: uncomment after ckb-cli TxHelper fixed
+    # test_contract_create_contract()
 
 if __name__ == "__main__":
     main()
