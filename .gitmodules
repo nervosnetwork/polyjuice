@@ -1,0 +1,16 @@
+[submodule "c/deps/secp256k1"]
+	path = c/deps/secp256k1
+	url = https://github.com/TheWaWaR/secp256k1
+[submodule "c/deps/ckb-c-stdlib"]
+	path = c/deps/ckb-c-stdlib
+	url = https://github.com/TheWaWaR/ckb-c-stdlib
+[submodule "c/deps/ethash"]
+	path = c/deps/ethash
+	url = https://github.com/TheWaWaR/ethash
+  branch = support-riscv
+[submodule "c/deps/evmone"]
+	path = c/deps/evmone
+	url = https://github.com/ethereum/evmone
+[submodule "c/deps/intx"]
+	path = c/deps/intx
+	url = https://github.com/chfast/intx
