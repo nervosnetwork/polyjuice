@@ -53,10 +53,9 @@ fi
 cp ${INTEGRATION_ROOT}/ckb-cli_${CKB_CLI_VERSION}_x86_64-unknown-linux-gnu/ckb-cli ${INTEGRATION_ROOT}
 ckb-cli --version
 
-# Build contracts
+# Build c contracts
 cd ${PROJECT_ROOT}/c
 make all-via-docker
-VALIDATOR_BIN=$(pwd)/c/build/validator
 
 # Deploy contracts
 rm -rf ${HOME}/.ckb-cli/index-v1/0x823b2ff5785b12da8b1363cac9a5cbe566d8b715a4311441b119c39a0367488c
@@ -130,7 +129,11 @@ if [ -f "${POLYJUICE_PID}" ]; then
     rm ${POLYJUICE_PID}
 fi
 rm -rf data
-RUST_LOG=info,polyjuice_ng=debug polyjuice-ng run --generator ${PROJECT_ROOT}/c/build/generator --db ${INTEGRATION_ROOT}/data --config ${INTEGRATION_ROOT}/run_config.json --url ${API_URL} >polyjuice.log 2>&1 &
+RUST_LOG=info,polyjuice_ng=debug polyjuice-ng run \
+        --generator ${PROJECT_ROOT}/c/build/generator \
+        --db ${INTEGRATION_ROOT}/data \
+        --config ${INTEGRATION_ROOT}/run_config.json \
+        --url ${API_URL} >polyjuice.log 2>&1 &
 echo $! > ${POLYJUICE_PID}
 sleep 3
 

@@ -67,6 +67,14 @@ fn main() -> Result<(), String> {
                         .default_value("http://127.0.0.1:8114")
                         .help("The ckb rpc url")
                 )
+                .arg(
+                    Arg::with_name("listen")
+                        .long("listen")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("127.0.0.1:8214")
+                        .help("Polyjuice rpc server listen address")
+                )
         )
         .subcommand(
             SubCommand::with_name("sign-tx")
@@ -176,6 +184,7 @@ fn main() -> Result<(), String> {
             };
             let ckb_uri = m.value_of("url").unwrap();
             let db_dir = m.value_of("db").unwrap();
+            let listen_addr = m.value_of("listen").unwrap();
 
             log::info!("Open database: {:?}", db_dir);
             let db = Arc::new(DB::open_default(db_dir).expect("rocksdb"));
@@ -192,7 +201,6 @@ fn main() -> Result<(), String> {
                 .to_delegate(),
             );
 
-            let rpc_url = "127.0.0.1:8214";
             let rpc_server = ServerBuilder::new(io_handler)
                 .cors(DomainsValidation::AllowOnly(vec![
                     AccessControlAllowOrigin::Null,
@@ -200,9 +208,9 @@ fn main() -> Result<(), String> {
                 ]))
                 .threads(4)
                 .max_request_body_size(10_485_760)
-                .start_http(&rpc_url.parse().expect("parse listen address"))
+                .start_http(&listen_addr.parse().expect("parse listen address"))
                 .expect("jsonrpc initialize");
-            log::info!("RPC server listen on: {}", rpc_url);
+            log::info!("RPC server listen on: {}", listen_addr);
 
             // Wait for exit
             let exit = Arc::new((Mutex::new(()), Condvar::new()));
