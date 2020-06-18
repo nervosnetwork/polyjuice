@@ -40,6 +40,7 @@ SELF_DESTRUCT = "SelfDestruct"
 ERC20 = "ERC20"
 ERC721 = "KittyCore"
 CREATE_CONTRACT = "CreateContract"
+CALL_CONTRACT = "CallContract"
 
 contracts_binary = {
     SIMPLE_STORAGE: "60806040525b607b60006000508190909055505b610018565b60db806100266000396000f3fe60806040526004361060295760003560e01c806360fe47b114602f5780636d4ce63c14605b576029565b60006000fd5b60596004803603602081101560445760006000fd5b81019080803590602001909291905050506084565b005b34801560675760006000fd5b50606e6094565b6040518082815260200191505060405180910390f35b8060006000508190909055505b50565b6000600060005054905060a2565b9056fea26469706673582212204e58804e375d4a732a7b67cce8d8ffa904fa534d4555e655a433ce0a5e0d339f64736f6c63430006060033",
@@ -48,6 +49,7 @@ contracts_binary = {
     ERC20: open(os.path.join(script_dir, 'ERC20.bin'), 'r').read().strip(),
     ERC721: open(os.path.join(script_dir, 'KittyCore.bin'), 'r').read().strip(),
     CREATE_CONTRACT: open(os.path.join(script_dir, 'CreateContract.bin'), 'r').read().strip(),
+    CALL_CONTRACT: open(os.path.join(script_dir, 'CallContract.bin'), 'r').read().strip(),
 }
 
 def send_jsonrpc(method, params):
@@ -213,13 +215,31 @@ def test_contract_create_contract():
     contract_address = create_contract_by_name(contract_name)
     print("[Finish]: {}\n".format(contract_name))
 
+def test_contract_call_contract():
+    contract_name = CALL_CONTRACT
+    print("[Start]: {}\n".format(contract_name))
+    ss_address = create_contract_by_name(SIMPLE_STORAGE)
+    print("create SimpleStorage contract({}) for {}".format(ss_address, contract_name))
+    args = "000000000000000000000000{}".format(ss_address[2:])
+    assert(len(args) == 64)
+    contract_address = create_contract_by_name(contract_name, constructor_args=args)
+
+    # ethabi => proxySet(222)
+    call_args = "0x28cc7b2500000000000000000000000000000000000000000000000000000000000000de"
+    result = call_contract(contract_address, call_args)
+    action_name = "call-{}-{}-{}".format(contract_name, contract_address, args)
+    # commit_tx(result, action_name[:42])
+    print("[Finish]: {}\n".format(contract_name))
+
+
 def main():
     test_simple_storage()
     test_log_events()
     test_self_destruct()
     test_erc20()
     test_erc721_kitty_core()
-    #  TODO: uncomment after ckb-cli TxHelper fixed
+    test_contract_call_contract()
+    # #  TODO: uncomment after ckb-cli TxHelper fixed
     # test_contract_create_contract()
 
 if __name__ == "__main__":

@@ -7,6 +7,8 @@
 #define _CSAL_LOG_SYSCALL_NUMBER 3076
 #define _CSAL_SELFDESTRUCT_SYSCALL_NUMBER 3077
 #define _CSAL_CALL_SYSCALL_NUMBER 3078
+#define _CSAL_GET_CODE_SIZE_SYSCALL_NUMBER 3079
+#define _CSAL_COPY_CODE_SYSCALL_NUMBER 3080
 
 static char debug_buffer[64 * 1024];
 static void debug_print_data(const char *prefix,
@@ -36,6 +38,12 @@ int csal_selfdestruct(const uint8_t *data, uint32_t data_length) {
 }
 int csal_call(uint8_t *result_data, const uint8_t *msg_data) {
   return syscall(_CSAL_CALL_SYSCALL_NUMBER, result_data, msg_data, 0, 0, 0, 0);
+}
+int csal_get_code_size(uint8_t *address, uint32_t *code_size) {
+  return syscall(_CSAL_GET_CODE_SIZE_SYSCALL_NUMBER, address, code_size, 0, 0, 0, 0);
+}
+int csal_copy_code(uint8_t *address, uint32_t code_offset, uint8_t *buffer_data, uint32_t buffer_size, uint32_t *done_size) {
+  return syscall(_CSAL_COPY_CODE_SYSCALL_NUMBER, address, code_offset, buffer_data, buffer_size, done_size, 0);
 }
 
 void release_result(const struct evmc_result* result) {
@@ -85,7 +93,14 @@ enum evmc_storage_status set_storage(struct evmc_host_context* context,
 
 size_t get_code_size(struct evmc_host_context* context,
                      const evmc_address* address) {
-  return 0;
+  uint32_t code_size = 0;
+  int ret = csal_get_code_size((uint8_t *)address->bytes, &code_size);
+  debug_print_int("code size", code_size);
+  if (ret != CKB_SUCCESS) {
+    ckb_debug("get code size failed");
+    return 0;
+  }
+  return (size_t)code_size;
 }
 
 evmc_bytes32 get_code_hash(struct evmc_host_context* context,
@@ -99,7 +114,17 @@ size_t copy_code(struct evmc_host_context* context,
                  size_t code_offset,
                  uint8_t* buffer_data,
                  size_t buffer_size) {
-  return 0;
+  uint32_t done_size = 0;
+  int ret = csal_copy_code((uint8_t *)address->bytes,
+                           (uint32_t)code_offset,
+                           buffer_data,
+                           (uint32_t)buffer_size,
+                           &done_size);
+  if (ret != CKB_SUCCESS) {
+    ckb_debug("copy_code failed");
+    return 0;
+  }
+  return (size_t)done_size;
 }
 
 evmc_uint256be get_balance(struct evmc_host_context* context,
