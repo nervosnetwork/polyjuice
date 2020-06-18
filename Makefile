@@ -14,6 +14,6 @@ prod: ## Build binary with release profile.
 	cargo build --release
 
 integration:
-	echo "TODO"
+	bash devtools/ci/integration.sh
 
-.PHONY: test clippy fmt ci prod
+.PHONY: test clippy fmt ci prod integration

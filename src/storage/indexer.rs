@@ -66,10 +66,10 @@ impl Indexer {
             let next_header = if let Some(value::Last { number, hash }) =
                 db_get(&self.db, &last_block_key_bytes)?
             {
-                match self.client.get_header_by_number(number + 1)? {
-                    Some(header) if header.inner.parent_hash == hash => header,
+                match self.client.get_header_by_number(number + 1) {
+                    Ok(Some(header)) if header.inner.parent_hash == hash => header,
                     // Rollback
-                    Some(_header) => {
+                    Ok(Some(_header)) => {
                         log::info!("Rollback block, nubmer={}, hash={}", number, hash);
                         let block_delta_key = Bytes::from(&Key::BlockDelta(number));
                         let block_delta: value::BlockDelta = db_get(&self.db, &block_delta_key)?
@@ -174,10 +174,15 @@ impl Indexer {
                         self.db.write(batch).map_err(|err| err.to_string())?;
                         continue;
                     }
-                    None => {
+                    Ok(None) => {
                         // Reach the tip, wait 200ms for next block
                         sleep(Duration::from_millis(100));
                         // TODO: clean up OLD block delta here (before tip-200)
+                        continue;
+                    }
+                    Err(err) => {
+                        log::error!("RPC error: {}", err);
+                        sleep(Duration::from_millis(1000));
                         continue;
                     }
                 }
@@ -185,11 +190,21 @@ impl Indexer {
                 self.client.get_header_by_number(0)?.unwrap()
             };
 
-            let next_block = match self.client.get_block(next_header.hash.clone())? {
-                Some(block) => block,
-                None => {
+            log::debug!(
+                "get block {} => {:x}",
+                next_header.inner.number.value(),
+                next_header.hash
+            );
+            let next_block = match self.client.get_block(next_header.hash.clone()) {
+                Ok(Some(block)) => block,
+                Ok(None) => {
                     log::warn!("Can not get block by hash: {:?}", next_header.hash);
                     sleep(Duration::from_millis(200));
+                    continue;
+                }
+                Err(err) => {
+                    log::error!("RPC error: {}", err);
+                    sleep(Duration::from_millis(1000));
                     continue;
                 }
             };

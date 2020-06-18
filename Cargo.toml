@@ -14,7 +14,7 @@ env_logger = "0.7.1"
 serde = { version = "1.0", features = ["derive"] }
 tempfile = "3.1"
 serde_json = "1.0"
-reqwest = "0.9"
+reqwest = { version = "0.10", features = ["blocking", "json"] }
 bincode = "1.2.1"
 rocksdb = "0.14.0"
 failure = "0.1.5"
@@ -26,9 +26,9 @@ jsonrpc-derive = "14.0"
 jsonrpc-server-utils = "14.0"
 jsonrpc-http-server = "14.0"
 ckb-vm = { version = "0.19.1", features = ["asm"] }
-sparse-merkle-tree = { git = "https://github.com/jjyr/sparse-merkle-tree", rev = "0e313cf" }
+sparse-merkle-tree = "0.3"
 ckb-hash = { git = "https://github.com/nervosnetwork/ckb", tag = "v0.31.0-pre1" }
 ckb-types = { git = "https://github.com/nervosnetwork/ckb", tag = "v0.31.0-pre1" }
 ckb-jsonrpc-types = { git = "https://github.com/nervosnetwork/ckb", tag = "v0.31.0-pre1" }
 # ckb-simple-account-layer = { git = "https://github.com/nervosnetwork/ckb-simple-account-layer", rev = "83f20d9" }
-ckb-simple-account-layer = { git = "https://github.com/TheWaWaR/ckb-simple-account-layer.git", rev = "b8192ebd" }
+ckb-simple-account-layer = { git = "https://github.com/TheWaWaR/ckb-simple-account-layer.git", rev = "e39e18529eef177092969bb0461e1f29352d6aef" }

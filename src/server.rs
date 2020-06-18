@@ -66,12 +66,15 @@ pub struct RpcImpl {
 
 impl Rpc for RpcImpl {
     fn create(&self, sender: H160, code: JsonBytes) -> RpcResult<TransactionReceipt> {
+        log::debug!("create(sender: {:x})", sender);
         let loader = Loader::clone(&self.loader);
         let run_config = self.run_config.clone();
         let context = Runner::new(loader, run_config)
             .create(sender, code.into_bytes())
             .map_err(convert_err_box)?;
-        TransactionReceipt::try_from(context).map_err(convert_err)
+        let resp = TransactionReceipt::try_from(context).map_err(convert_err);
+        log::debug!("create finished");
+        resp
     }
 
     fn call(
@@ -80,12 +83,20 @@ impl Rpc for RpcImpl {
         contract_address: ContractAddress,
         input: JsonBytes,
     ) -> RpcResult<TransactionReceipt> {
+        log::debug!(
+            "call(sender: {:x}, contract_address: {:x}, input: {})",
+            sender,
+            contract_address.0,
+            hex::encode(input.as_bytes())
+        );
         let loader = Loader::clone(&self.loader);
         let run_config = self.run_config.clone();
         let context = Runner::new(loader, run_config)
             .call(sender, contract_address, input.into_bytes())
             .map_err(convert_err_box)?;
-        TransactionReceipt::try_from(context).map_err(convert_err)
+        let resp = TransactionReceipt::try_from(context).map_err(convert_err);
+        log::debug!("call finished");
+        resp
     }
 
     fn static_call(
@@ -94,15 +105,23 @@ impl Rpc for RpcImpl {
         contract_address: ContractAddress,
         input: JsonBytes,
     ) -> RpcResult<StaticCallResponse> {
+        log::debug!(
+            "static_call(sender: {:x}, contract_address: {:x}, input: {})",
+            sender,
+            contract_address.0,
+            hex::encode(input.as_bytes())
+        );
         let loader = Loader::clone(&self.loader);
         let run_config = self.run_config.clone();
         let context = Runner::new(loader, run_config)
             .static_call(sender, contract_address, input.into_bytes())
             .map_err(convert_err_box)?;
+        log::debug!("static_call finished");
         StaticCallResponse::try_from(context).map_err(convert_err)
     }
 
     fn get_code(&self, contract_address: ContractAddress) -> RpcResult<ContractCodeJson> {
+        log::debug!("get_code(contract_address: {:x})", contract_address.0);
         self.loader
             .load_contract_meta(contract_address)
             .map(ContractCodeJson::from)
@@ -114,6 +133,11 @@ impl Rpc for RpcImpl {
         from_block: u64,
         to_block: Option<u64>,
     ) -> RpcResult<Vec<ContractMetaJson>> {
+        log::debug!(
+            "get_contracts(from_block: {}, to_block: {:?})",
+            from_block,
+            to_block
+        );
         let mut loader = Loader::clone(&self.loader);
         loader
             .load_contract_meta_list(from_block, to_block)

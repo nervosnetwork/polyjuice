@@ -15,7 +15,7 @@ macro_rules! jsonrpc {
     ) => (
         $(#[$struct_attr])*
         pub struct $struct_name {
-            pub client: reqwest::Client,
+            pub client: reqwest::blocking::Client,
             pub url: reqwest::Url,
             pub id: u64,
         }
@@ -23,7 +23,7 @@ macro_rules! jsonrpc {
         impl $struct_name {
             pub fn new(uri: &str) -> Self {
                 let url = reqwest::Url::parse(uri).expect("ckb uri, e.g. \"http://127.0.0.1:8114\"");
-                $struct_name { url, id: 0, client: reqwest::Client::new(), }
+                $struct_name { url, id: 0, client: reqwest::blocking::Client::new(), }
             }
 
             $(
@@ -39,7 +39,7 @@ macro_rules! jsonrpc {
                     req_json.insert("method".to_owned(), serde_json::json!(method));
                     req_json.insert("params".to_owned(), params);
 
-                    let mut resp = $selff.client.post($selff.url.clone()).json(&req_json).send()?;
+                    let resp = $selff.client.post($selff.url.clone()).json(&req_json).send()?;
                     let output = resp.json::<ckb_jsonrpc_types::response::Output>()?;
                     match output {
                         ckb_jsonrpc_types::response::Output::Success(success) => {

@@ -52,6 +52,14 @@ fn main() -> Result<(), String> {
                         .help("The config (json)")
                 )
                 .arg(
+                    Arg::with_name("db")
+                        .long("db")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("./data")
+                        .help("Database directory")
+                )
+                .arg(
                     Arg::with_name("url")
                         .long("url")
                         .takes_value(true)
@@ -167,8 +175,10 @@ fn main() -> Result<(), String> {
                 lock_script: config_json.lock_script.into(),
             };
             let ckb_uri = m.value_of("url").unwrap();
+            let db_dir = m.value_of("db").unwrap();
 
-            let db = Arc::new(DB::open_default("./data").expect("rocksdb"));
+            log::info!("Open database: {:?}", db_dir);
+            let db = Arc::new(DB::open_default(db_dir).expect("rocksdb"));
             let loader = Arc::new(Loader::new(Arc::clone(&db), ckb_uri).expect("loader failure"));
             let mut indexer = Indexer::new(Arc::clone(&db), ckb_uri, run_config.clone());
             let _ = thread::spawn(move || indexer.index().expect("indexer faliure"));

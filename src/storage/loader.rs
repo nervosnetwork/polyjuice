@@ -107,6 +107,7 @@ impl Loader {
                     //   * immature cells
                     //   * cell with type script
                     //   * cell with output data
+                    iter.next();
                     continue;
                 }
                 live_cells.push(value.out_point());

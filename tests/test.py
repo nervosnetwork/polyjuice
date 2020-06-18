@@ -2,11 +2,15 @@
 #coding: utf-8
 
 import tempfile
-import requests
 import json
 import sys
 import os
 import subprocess
+import time
+
+if len(sys.argv) < 3:
+    print("USAGE:\n    python {} <json-dir> <ckb-binary-path>".format(sys.argv[0]))
+    exit(-1)
 
 URL = "http://localhost:8214"
 SENDER1 = "0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7"
@@ -42,10 +46,6 @@ contracts_binary = {
     ERC721: open(os.path.join(script_dir, 'KittyCore.bin'), 'r').read().strip(),
 }
 
-if len(sys.argv) < 3:
-    print("USAGE:\n    python {} <json-dir> <ckb-binary-path>".format(sys.argv[0]))
-    exit(-1)
-
 def send_jsonrpc(method, params):
     payload = {
         "id": 0,
@@ -53,10 +53,13 @@ def send_jsonrpc(method, params):
         "method": method,
         "params": params,
     }
-    resp = requests.post(URL, json=payload).json()
+    cmd = "curl -s -H 'content-type: application/json' -d '{}' {}".format(json.dumps(payload), URL)
+    output = subprocess.check_output(cmd, shell=True).strip().decode("utf-8")
+    resp = json.loads(output)
     if "error" in resp:
         print("JSONRPC ERROR: {}".format(resp["error"]))
         exit(-1)
+    time.sleep(0.5)
     return resp["result"]
 
 def create_contract(binary, constructor_args="", sender=SENDER1):
@@ -90,10 +93,10 @@ def commit_tx(result, action_name, privkey_path=privkey1_path):
         json.dump(result, f, indent=4)
     tx_path = os.path.join(target_dir, "{}-tx.json".format(action_name))
     tx_raw_path = os.path.join(target_dir, "{}-raw-tx.json".format(action_name))
-    tx_moack_path = os.path.join(target_dir, "{}-mock-tx.json".format(action_name))
+    # tx_moack_path = os.path.join(target_dir, "{}-mock-tx.json".format(action_name))
     run_cmd("polyjuice-ng sign-tx -k {} -t {} -o {}".format(privkey_path, result_path, tx_path))
     run_cmd("cat {} | jq .transaction > {}".format(tx_path, tx_raw_path))
-    run_cmd("ckb-cli mock-tx dump --tx-file {} --output-file {}".format(tx_raw_path, tx_moack_path))
+    # run_cmd("ckb-cli mock-tx dump --tx-file {} --output-file {}".format(tx_raw_path, tx_moack_path))
     run_cmd("ckb-cli tx send --tx-file {} --skip-check".format(tx_path))
     mine_blocks()
 
