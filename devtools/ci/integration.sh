@@ -129,7 +129,7 @@ if [ -f "${POLYJUICE_PID}" ]; then
     rm ${POLYJUICE_PID}
 fi
 rm -rf data
-RUST_LOG=info,polyjuice_ng=debug polyjuice-ng run \
+RUST_LOG=info,polyjuice=debug polyjuice run \
         --generator ${PROJECT_ROOT}/c/build/generator \
         --db ${INTEGRATION_ROOT}/data \
         --config ${INTEGRATION_ROOT}/run_config.json \

@@ -94,7 +94,7 @@ def commit_tx(result, action_name, privkey_path=privkey1_path):
     tx_path = os.path.join(target_dir, "{}-tx.json".format(action_name))
     tx_raw_path = os.path.join(target_dir, "{}-raw-tx.json".format(action_name))
     # tx_moack_path = os.path.join(target_dir, "{}-mock-tx.json".format(action_name))
-    run_cmd("polyjuice-ng sign-tx -k {} -t {} -o {}".format(privkey_path, result_path, tx_path))
+    run_cmd("polyjuice sign-tx -k {} -t {} -o {}".format(privkey_path, result_path, tx_path))
     run_cmd("cat {} | jq .transaction > {}".format(tx_path, tx_raw_path))
     # run_cmd("ckb-cli mock-tx dump --tx-file {} --output-file {}".format(tx_raw_path, tx_moack_path))
     run_cmd("ckb-cli tx send --tx-file {} --skip-check".format(tx_path))
