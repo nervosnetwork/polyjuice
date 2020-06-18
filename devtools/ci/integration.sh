@@ -141,7 +141,7 @@ sleep 3
 rm -rf ${INTEGRATION_ROOT}/contract-files
 mkdir -p ${INTEGRATION_ROOT}/contract-files
 cd ${PROJECT_ROOT}
-python ./tests/test.py ${INTEGRATION_ROOT}/contract-files ${CKB_BIN}
+python ./tests/test.py ${INTEGRATION_ROOT}/contract-files ${CKB_BIN} ${API_URL}
 
 # Clean up
 kill -9 `cat ${CKB_PID}`

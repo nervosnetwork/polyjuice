@@ -181,8 +181,8 @@ impl Indexer {
                         continue;
                     }
                     Err(err) => {
-                        log::error!("RPC error: {}", err);
-                        sleep(Duration::from_millis(1000));
+                        log::warn!("RPC error: {}", err);
+                        sleep(Duration::from_millis(5000));
                         continue;
                     }
                 }

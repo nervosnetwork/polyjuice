@@ -31,6 +31,12 @@ use types::{CallKind, ContractAddress, EoaAddress, Program, RunConfig, WitnessDa
 fn main() -> Result<(), String> {
     env_logger::init();
 
+    let arg_ckb_url = Arg::with_name("url")
+        .long("url")
+        .takes_value(true)
+        .required(true)
+        .default_value("http://127.0.0.1:8114")
+        .help("The ckb rpc url");
     let matches = App::new("polyjuice")
         .subcommand(
             SubCommand::with_name("run")
@@ -60,14 +66,6 @@ fn main() -> Result<(), String> {
                         .help("Database directory")
                 )
                 .arg(
-                    Arg::with_name("url")
-                        .long("url")
-                        .takes_value(true)
-                        .required(true)
-                        .default_value("http://127.0.0.1:8114")
-                        .help("The ckb rpc url")
-                )
-                .arg(
                     Arg::with_name("listen")
                         .long("listen")
                         .takes_value(true)
@@ -75,6 +73,7 @@ fn main() -> Result<(), String> {
                         .default_value("127.0.0.1:8214")
                         .help("Polyjuice rpc server listen address")
                 )
+                .arg(arg_ckb_url.clone())
         )
         .subcommand(
             SubCommand::with_name("sign-tx")
@@ -104,6 +103,7 @@ fn main() -> Result<(), String> {
                         .takes_value(true)
                         .help("The output file path")
                 )
+                .arg(arg_ckb_url)
         )
         .subcommand(
             SubCommand::with_name("build-tx")
@@ -243,6 +243,7 @@ fn main() -> Result<(), String> {
                 .and_then(|data| {
                     secp256k1::SecretKey::from_slice(data.as_slice()).map_err(|err| err.to_string())
                 })?;
+            let ckb_uri = m.value_of("url").unwrap();
 
             println!("Building signature");
             let tx = packed::Transaction::from(tx_receipt.tx.clone());
@@ -319,9 +320,12 @@ fn main() -> Result<(), String> {
             let tx_file = NamedTempFile::new().map_err(|err| err.to_string())?;
             let tx_path_str = tx_file.path().to_str().unwrap();
 
-            println!("[Command]: ckb-cli tx init --tx-file {}", tx_path_str);
+            println!(
+                "[Command]: ckb-cli --url {} tx init --tx-file {}",
+                ckb_uri, tx_path_str
+            );
             let output = Command::new("ckb-cli")
-                .args(&["tx", "init", "--tx-file", tx_path_str])
+                .args(&["--url", ckb_uri, "tx", "init", "--tx-file", tx_path_str])
                 .output()
                 .expect("Failed to execute command");
             if output.status.success() {
@@ -333,6 +337,7 @@ fn main() -> Result<(), String> {
 
             // Replace transaction in --tx-file
             let cli_tx_content = fs::read_to_string(tx_path_str).unwrap();
+            println!("tx: {}", cli_tx_content);
             let mut cli_tx: serde_json::Value = serde_json::from_str(&cli_tx_content).unwrap();
             cli_tx["transaction"] = tx_body;
             fs::write(
@@ -347,6 +352,8 @@ fn main() -> Result<(), String> {
             );
             let output = Command::new("ckb-cli")
                 .args(&[
+                    "--url",
+                    ckb_uri,
                     "tx",
                     "sign-inputs",
                     "--privkey-path",

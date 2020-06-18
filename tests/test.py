@@ -8,8 +8,8 @@ import os
 import subprocess
 import time
 
-if len(sys.argv) < 3:
-    print("USAGE:\n    python {} <json-dir> <ckb-binary-path>".format(sys.argv[0]))
+if len(sys.argv) < 4:
+    print("USAGE:\n    python {} <json-dir> <ckb-binary-path> <ckb-rpc-url>".format(sys.argv[0]))
     exit(-1)
 
 URL = "http://localhost:8214"
@@ -20,10 +20,12 @@ ADDRESS2 = "ckt1qyqgjagv5f8xq9syxd38v2ga3dczszqy67psu2y8r4"
 SENDER2_PRIVKEY = "3066aa42bfa95c6d033edfad9d1efb871991fd26f56270fedc171559823bee77"
 target_dir = sys.argv[1]
 ckb_bin_path = sys.argv[2]
+ckb_rpc_url = sys.argv[3]
 ckb_dir = os.path.dirname(os.path.abspath(ckb_bin_path))
 script_dir = os.path.dirname(os.path.abspath(__file__))
 privkey1_path = os.path.join(target_dir, "{}.privkey".format(SENDER1))
 privkey2_path = os.path.join(target_dir, "{}.privkey".format(SENDER2))
+os.environ["API_URL"] = ckb_rpc_url
 
 if not os.path.exists(privkey1_path):
     with open(privkey1_path, 'w') as f:
@@ -81,7 +83,7 @@ def call_contract(contract_address, args, is_static=False, sender=SENDER1):
 
 def run_cmd(cmd):
     print("[RUN]: {}".format(cmd))
-    output = subprocess.check_output(cmd, shell=True).strip().decode("utf-8")
+    output = subprocess.check_output(cmd, shell=True, env=os.environ).strip().decode("utf-8")
     print("[Output]: {}".format(output))
 
 def mine_blocks(n=5):
@@ -94,7 +96,7 @@ def commit_tx(result, action_name, privkey_path=privkey1_path):
     tx_path = os.path.join(target_dir, "{}-tx.json".format(action_name))
     tx_raw_path = os.path.join(target_dir, "{}-raw-tx.json".format(action_name))
     # tx_moack_path = os.path.join(target_dir, "{}-mock-tx.json".format(action_name))
-    run_cmd("polyjuice sign-tx -k {} -t {} -o {}".format(privkey_path, result_path, tx_path))
+    run_cmd("polyjuice sign-tx --url {} -k {} -t {} -o {}".format(ckb_rpc_url, privkey_path, result_path, tx_path))
     run_cmd("cat {} | jq .transaction > {}".format(tx_path, tx_raw_path))
     # run_cmd("ckb-cli mock-tx dump --tx-file {} --output-file {}".format(tx_raw_path, tx_moack_path))
     run_cmd("ckb-cli tx send --tx-file {} --skip-check".format(tx_path))
