@@ -4,7 +4,7 @@ set -eu
 set -x
 
 BRANCH="v0.33.0-pre1"
-CKB_CLI_VERSION="v0.33.0"
+CKB_CLI_VERSION="v0.33.1"
 API_URL="http://localhost:9114"
 
 PROJECT_ROOT=$(pwd)

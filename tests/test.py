@@ -238,9 +238,8 @@ def main():
     test_self_destruct()
     test_erc20()
     test_erc721_kitty_core()
+    test_contract_create_contract()
     test_contract_call_contract()
-    # #  TODO: uncomment after ckb-cli TxHelper fixed
-    # test_contract_create_contract()
 
 if __name__ == "__main__":
     main()
