@@ -6,6 +6,8 @@ set -x
 BRANCH="v0.33.0-pre1"
 CKB_CLI_VERSION="v0.33.1"
 API_URL="http://localhost:9114"
+POLYJUICE_LISTEN="127.0.0.1:9214"
+POLYJUICE_URL="http://${POLYJUICE_LISTEN}"
 
 PROJECT_ROOT=$(pwd)
 INTEGRATION_ROOT="$(pwd)/integration"
@@ -133,6 +135,7 @@ RUST_LOG=info,polyjuice=debug polyjuice run \
         --generator ${PROJECT_ROOT}/c/build/generator \
         --db ${INTEGRATION_ROOT}/data \
         --config ${INTEGRATION_ROOT}/run_config.json \
+        --listen ${POLYJUICE_LISTEN} \
         --url ${API_URL} >polyjuice.log 2>&1 &
 echo $! > ${POLYJUICE_PID}
 sleep 3
@@ -141,7 +144,7 @@ sleep 3
 rm -rf ${INTEGRATION_ROOT}/contract-files
 mkdir -p ${INTEGRATION_ROOT}/contract-files
 cd ${PROJECT_ROOT}
-python ./tests/test.py ${INTEGRATION_ROOT}/contract-files ${CKB_BIN} ${API_URL}
+python ./tests/test.py ${INTEGRATION_ROOT}/contract-files ${CKB_BIN} ${API_URL} ${POLYJUICE_URL}
 
 # Clean up
 kill -9 `cat ${CKB_PID}`

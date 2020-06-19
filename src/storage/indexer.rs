@@ -8,7 +8,7 @@ use ckb_types::{
     H160, H256,
 };
 use ckb_vm::{
-    registers::{A0, A1, A7},
+    registers::{A0, A1, A2, A3, A4, A7},
     Error as VMError, Memory, Register, SupportMachine,
 };
 use rocksdb::{WriteBatch, DB};
@@ -847,6 +847,53 @@ impl<Mac: SupportMachine> RunContext<Mac> for ContractExtractor {
                 machine
                     .memory_mut()
                     .store_bytes(result_data_address, result_data.as_ref())?;
+                Ok(true)
+            }
+            // get code size
+            3079 => {
+                let address_ptr = machine.registers()[A0].to_u64();
+                let address: H160 = vm_load_h160(machine, address_ptr)?;
+                let code_size_ptr = machine.registers()[A1].to_u64();
+                log::debug!("[get_code_size]: address={:x}", address);
+                let code_size = self
+                    .script_groups
+                    .get(&ContractAddress(address))
+                    .expect("Can not get contract info")
+                    .code()
+                    .len() as u32;
+                machine
+                    .memory_mut()
+                    .store_bytes(code_size_ptr, &code_size.to_le_bytes()[..])?;
+                machine.set_register(A0, Mac::REG::from_u8(0));
+                Ok(true)
+            }
+            // copy code
+            3080 => {
+                let address_ptr = machine.registers()[A0].to_u64();
+                let code_offset = machine.registers()[A1].to_u32() as usize;
+                let buffer_data_ptr = machine.registers()[A2].to_u64();
+                let buffer_size = machine.registers()[A3].to_u32() as usize;
+                let done_size_ptr = machine.registers()[A4].to_u64();
+
+                let address: H160 = vm_load_h160(machine, address_ptr)?;
+                log::debug!("[copy_code]: address={:x}", address);
+                let code = self
+                    .script_groups
+                    .get(&ContractAddress(address))
+                    .expect("Can not get contract info")
+                    .code();
+                let done_size = std::cmp::min(code.len() - code_offset, buffer_size);
+                let code_slice = &code.as_ref()[code_offset..code_offset + done_size];
+
+                log::debug!("code done size: {}", done_size);
+                log::debug!("code slice: {}", hex::encode(code_slice));
+                machine
+                    .memory_mut()
+                    .store_bytes(buffer_data_ptr, code_slice)?;
+                machine
+                    .memory_mut()
+                    .store_bytes(done_size_ptr, &(done_size as u32).to_le_bytes()[..])?;
+                machine.set_register(A0, Mac::REG::from_u8(0));
                 Ok(true)
             }
             _ => Ok(false),

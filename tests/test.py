@@ -8,11 +8,10 @@ import os
 import subprocess
 import time
 
-if len(sys.argv) < 4:
-    print("USAGE:\n    python {} <json-dir> <ckb-binary-path> <ckb-rpc-url>".format(sys.argv[0]))
+if len(sys.argv) < 4 or len(sys.argv) > 5:
+    print("USAGE:\n    python {} <json-dir> <ckb-binary-path> <ckb-rpc-url> <polyjuice-rpc>".format(sys.argv[0]))
     exit(-1)
 
-URL = "http://localhost:8214"
 SENDER1 = "0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7"
 SENDER1_PRIVKEY = "d00c06bfd800d27397002dca6fb0993d5ba6399b4238b2f29ee9deb97593d2bc"
 SENDER2 = "0x89750ca24e601604336276291d8b70280804d783"
@@ -21,6 +20,7 @@ SENDER2_PRIVKEY = "3066aa42bfa95c6d033edfad9d1efb871991fd26f56270fedc171559823be
 target_dir = sys.argv[1]
 ckb_bin_path = sys.argv[2]
 ckb_rpc_url = sys.argv[3]
+polyjuice_rpc_url = sys.argv[4] if len(sys.argv) == 5 else "http://localhost:8214"
 ckb_dir = os.path.dirname(os.path.abspath(ckb_bin_path))
 script_dir = os.path.dirname(os.path.abspath(__file__))
 privkey1_path = os.path.join(target_dir, "{}.privkey".format(SENDER1))
@@ -59,13 +59,12 @@ def send_jsonrpc(method, params):
         "method": method,
         "params": params,
     }
-    cmd = "curl -s -H 'content-type: application/json' -d '{}' {}".format(json.dumps(payload), URL)
+    cmd = "curl -s -H 'content-type: application/json' -d '{}' {}".format(json.dumps(payload), polyjuice_rpc_url)
     output = subprocess.check_output(cmd, shell=True).strip().decode("utf-8")
     resp = json.loads(output)
     if "error" in resp:
         print("JSONRPC ERROR: {}".format(resp["error"]))
         exit(-1)
-    time.sleep(0.5)
     return resp["result"]
 
 def create_contract(binary, constructor_args="", sender=SENDER1):
@@ -85,10 +84,12 @@ def call_contract(contract_address, args, is_static=False, sender=SENDER1):
     method = "static_call" if is_static else "call"
     return send_jsonrpc(method, [sender, contract_address, args])
 
-def run_cmd(cmd):
+def run_cmd(cmd, print_output=True):
     print("[RUN]: {}".format(cmd))
     output = subprocess.check_output(cmd, shell=True, env=os.environ).strip().decode("utf-8")
-    print("[Output]: {}".format(output))
+    if print_output:
+        print("[Output]: {}".format(output))
+    return output
 
 def mine_blocks(n=5):
     run_cmd("{} miner -C {} -l {}".format(ckb_bin_path, ckb_dir, n))
@@ -104,8 +105,14 @@ def commit_tx(result, action_name, privkey_path=privkey1_path):
     run_cmd("polyjuice sign-tx --url {} -k {} -t {} -o {}".format(ckb_rpc_url, privkey_path, result_path, tx_path))
     run_cmd("cat {} | jq .transaction > {}".format(tx_path, tx_raw_path))
     # run_cmd("ckb-cli mock-tx dump --tx-file {} --output-file {}".format(tx_raw_path, tx_moack_path))
-    run_cmd("ckb-cli tx send --tx-file {} --skip-check".format(tx_path))
-    mine_blocks()
+    for retry in range(3):
+        tx_hash = run_cmd("ckb-cli tx send --tx-file {} --skip-check".format(tx_path)).strip()
+        mine_blocks()
+        tx_content = run_cmd("ckb-cli rpc get_transaction --hash {}".format(tx_hash), print_output=False)
+        if tx_content.find(tx_hash) > -1:
+            print("Transaction sent: {}".format(tx_hash))
+            break;
+        print("Retry send transaction: {}".format(retry))
 
 def create_contract_by_name(name, constructor_args=""):
     result = create_contract(contracts_binary[name], constructor_args)
@@ -228,7 +235,7 @@ def test_contract_call_contract():
     call_args = "0x28cc7b2500000000000000000000000000000000000000000000000000000000000000de"
     result = call_contract(contract_address, call_args)
     action_name = "call-{}-{}-{}".format(contract_name, contract_address, args)
-    # commit_tx(result, action_name[:42])
+    commit_tx(result, action_name[:42])
     print("[Finish]: {}\n".format(contract_name))
 
 

@@ -277,6 +277,8 @@ int contract_info_init(contract_info *info,
     ckb_debug("no program in witness");
     return -99;
   }
+  info->code_size = head_program->code_size;
+  info->code_data = head_program->code_data;
   info->head_program = head_program;
   info->current_program = head_program;
   info->program_count = program_count;
@@ -300,7 +302,7 @@ int contract_info_next_program(contract_info *info) {
 
   contract_program *program = info->current_program;
   if (program->kind == EVMC_CREATE) {
-    /* Likely useless */
+    /* Used in: get_code_size,copy_code */
     info->code_size = program->return_data_size;
     info->code_data = program->return_data;
   }
@@ -544,7 +546,13 @@ enum evmc_storage_status set_storage(struct evmc_host_context* context,
 
 size_t get_code_size(struct evmc_host_context* context,
                      const evmc_address* address) {
-  return 0;
+  contract_info *info = NULL;
+  find_contract_info(&info, global_info_list, global_info_count, address);
+  if (info == NULL) {
+    debug_print_data("[get_code_size] can not find contract", address->bytes, 20);
+    return 0;
+  }
+  return info->code_size;
 }
 
 evmc_bytes32 get_code_hash(struct evmc_host_context* context,
@@ -558,7 +566,23 @@ size_t copy_code(struct evmc_host_context* context,
                  size_t code_offset,
                  uint8_t* buffer_data,
                  size_t buffer_size) {
-  return 0;
+  contract_info *info = NULL;
+  find_contract_info(&info, global_info_list, global_info_count, address);
+  if (info == NULL) {
+    debug_print_data("[copy_code] can not find contract", address->bytes, 20);
+    return 0;
+  }
+  if (info->code_size < code_offset) {
+    debug_print_int("invalid code_offset", code_offset);
+    debug_print_data("invalid code_offset for", address->bytes, 20);
+    return 0;
+  }
+  size_t done_size = buffer_size;
+  if (info->code_size < code_offset +  buffer_size) {
+    done_size = info->code_size - code_offset;
+  }
+  memcpy(buffer_data, info->code_data + code_offset, done_size);
+  return done_size;
 }
 
 evmc_uint256be get_balance(struct evmc_host_context* context,
