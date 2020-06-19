@@ -4,9 +4,9 @@ Nervos CKB is built on the cell model, which is a generalized version of the UTX
 
 That is also just our claim, as engineers we all know the famous quote "Talk is cheap. Show me the code." Following this principle, we designed and built polyjuice, which is an Ethereum compatible layer on top of Nervos CKB. Ethereum, up to this day, is probably the most used and flexible account model based blockchain. By polyjuice we want to showcase that it is perfectly possible to use account model on Nervos CKB. The flexibility here actually enables countless opportunities.
 
-To make things more interesting, we didn’t build an account layer that is tailored to Ethereum, we have extracted the [core account layer](https://github.com/nervosnetwork/ckb-simple-account-layer) from polyjuice. With this generic library, you are free to integrate any account layer as you wish. One exciting future we’d love to witness, is that [libra](https://libra.org/en-US/)’s exact programming model might also be ported over to CKB, enabling a much fruitful ecosystem.
-
 # A short tutorial
+
+**NOTE*** : The tutorial currently only tested on Ubuntu 18.04.
 
 Here we provide a short tutorial performing the following operations on a polyjuice on CKB setup:
 
@@ -49,7 +49,7 @@ $ ckb miner
 
 Since we need to sign secp256k1 sighash locked inputs in polyjuice generated transaction, we need a little help from `ckb-cli`. You need to download latest(version >= 0.33.1) ckb-cli from github [release page](https://github.com/nervosnetwork/ckb-cli/releases), and put in your `$PATH`, so polyjuice can find it.
 
-Some actions depend on `jq` to edit json information. You may install jq by:
+Some actions depend on `jq` to edit json information. You may install [jq](https://stedolan.github.io/jq/download/) by:
 
 ```bash
 $ sudo apt install jq -y
