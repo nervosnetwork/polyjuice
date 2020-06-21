@@ -243,6 +243,32 @@ def test_contract_call_contract():
     print("[Finish]: {}\n".format(contract_name))
 
 
+def test_call_multiple_times():
+    contract_name = CALL_MULTI
+    print("[Start]: {}\n".format(contract_name))
+    ss1_address = create_contract_by_name(SIMPLE_STORAGE)
+    print("create SimpleStorage.1 contract({}) for {}".format(ss1_address, contract_name))
+    ss2_address = create_contract_by_name(SIMPLE_STORAGE)
+    print("create SimpleStorage.2 contract({}) for {}".format(ss2_address, contract_name))
+
+    args = "000000000000000000000000{}".format(ss1_address[2:])
+    assert(len(args) == 64)
+    contract_address = create_contract_by_name(contract_name, constructor_args=args)
+
+    call_args = "0xbca0b9c2000000000000000000000000{}0000000000000000000000000000000000000000000000000000000000000014".format(ss2_address[2:])
+    result = call_contract(contract_address, call_args)
+    action_name = "call-{}-{}-{}".format(contract_name, contract_address, args)
+    commit_tx(result, action_name[:42])
+
+    static_call_args = "0x6d4ce63c"
+    result = call_contract(ss1_address, static_call_args, is_static=True)
+    assert(result["return_data"] == "0x0000000000000000000000000000000000000000000000000000000000000016")
+    result = call_contract(ss2_address, static_call_args, is_static=True)
+    assert(result["return_data"] == "0x0000000000000000000000000000000000000000000000000000000000000019")
+
+    print("[Finish]: {}\n".format(contract_name))
+
+
 def main():
     test_simple_storage()
     test_log_events()
@@ -251,6 +277,7 @@ def main():
     test_erc721_kitty_core()
     test_contract_create_contract()
     test_contract_call_contract()
+    test_call_multiple_times()
 
 if __name__ == "__main__":
     main()
