@@ -72,6 +72,8 @@ bool account_exists(struct evmc_host_context* context,
 evmc_bytes32 get_storage(struct evmc_host_context* context,
                          const evmc_address* address,
                          const evmc_bytes32* key) {
+  debug_print_data("[get_storage] address", address->bytes, 20);
+  debug_print_data("[get_storage]     key", key->bytes, 32);
   evmc_bytes32 value{};
   int ret;
   ret = csal_change_fetch(context->changes, key->bytes, value.bytes);
@@ -86,6 +88,9 @@ enum evmc_storage_status set_storage(struct evmc_host_context* context,
                                      const evmc_bytes32* key,
                                      const evmc_bytes32* value) {
   /* int _ret; */
+  debug_print_data("[set_storage] address", address->bytes, 20);
+  debug_print_data("[set_storage]     key", key->bytes, 32);
+  debug_print_data("[set_storage]   value", value->bytes, 32);
   csal_change_insert(context->existing_values, key->bytes, value->bytes);
   csal_change_insert(context->changes, key->bytes, value->bytes);
   return EVMC_STORAGE_ADDED;

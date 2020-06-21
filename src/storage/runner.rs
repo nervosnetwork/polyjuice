@@ -242,11 +242,15 @@ impl ContractInfo {
             .selfdestruct
             .as_ref()
             .map(|data| H160::from_slice(data.as_ref()).unwrap());
+        log::info!(
+            "contract {} have {} program",
+            self.execute_records[0].program.destination.0,
+            witness_data_vec.len()
+        );
         let mut data = BytesMut::default();
         for witness_data in witness_data_vec {
             data.put(witness_data.serialize().as_ref());
         }
-        log::debug!("put 0");
         // The end of all programs (just like '\0' of C string)
         data.put(&0u32.to_le_bytes()[..]);
         let data = BytesOpt::new_builder()

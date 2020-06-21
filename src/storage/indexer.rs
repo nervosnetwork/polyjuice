@@ -565,8 +565,16 @@ impl ContractInfo {
         }
     }
 
-    pub fn current_program(&self) -> &WitnessData {
+    pub fn current_witness(&self) -> &WitnessData {
         &self.programs[self.program_index]
+    }
+    pub fn current_program_data(&self) -> Bytes {
+        let mut witness = self.current_witness().clone();
+        if self.program_index > 0 {
+            // Put optmized code field back to program data
+            witness.program.code = self.code();
+        }
+        witness.program_data()
     }
 
     pub fn get_meta(&self, address: &ContractAddress, tx_hash: &H256) -> Option<ContractMeta> {
@@ -700,7 +708,7 @@ impl ContractExtractor {
                 .get(contract)
                 .ok_or_else(|| format!("No such contract to run: {:x}", contract.0))?;
             let tree_clone = SparseMerkleTree::new(*info.tree.root(), info.tree.store().clone());
-            let program_data = info.current_program().program_data();
+            let program_data = info.current_program_data();
             (tree_clone, program_data)
         };
         let config = Config::from(&self.run_config);
@@ -715,7 +723,7 @@ impl ContractExtractor {
             .script_groups
             .get_mut(contract)
             .ok_or_else(|| format!("No such contract to run: {:x}", contract.0))?;
-        let return_data = info.current_program().return_data.clone();
+        let return_data = info.current_witness().return_data.clone();
         result.commit(&mut info.tree).unwrap();
         info.program_index += 1;
         info.call_index = 0;
@@ -819,7 +827,7 @@ impl<Mac: SupportMachine> RunContext<Mac> for ContractExtractor {
                         .script_groups
                         .get_mut(&self.current_contract)
                         .expect("can not find current contract");
-                    let addr = info_mut.current_program().calls[info_mut.call_index]
+                    let addr = info_mut.current_witness().calls[info_mut.call_index]
                         .0
                         .clone();
                     info_mut.call_index += 1;
