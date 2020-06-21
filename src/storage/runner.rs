@@ -788,9 +788,10 @@ impl<Mac: SupportMachine> RunContext<Mac> for CsalRunContext {
                 let (code, input) = if kind == CallKind::CREATE {
                     (Bytes::from(input_data), Bytes::default())
                 } else {
-                    let code = self
-                        .get_contract_code(&destination)
-                        .map_err(|_err| VMError::IO(std::io::ErrorKind::InvalidInput))?;
+                    let code = self.get_contract_code(&destination).map_err(|_err| {
+                        log::warn!("load contract code failed: {:x}", destination.0);
+                        VMError::IO(std::io::ErrorKind::InvalidInput)
+                    })?;
                     (code, Bytes::from(input_data))
                 };
                 let program = Program {
@@ -844,8 +845,11 @@ impl<Mac: SupportMachine> RunContext<Mac> for CsalRunContext {
                 let code_size_ptr = machine.registers()[A1].to_u64();
                 let meta = self
                     .loader
-                    .load_contract_meta(ContractAddress(address))
-                    .map_err(|_err| VMError::IO(std::io::ErrorKind::InvalidInput))?;
+                    .load_contract_meta(ContractAddress(address.clone()))
+                    .map_err(|_err| {
+                        log::warn!("load contract meta failed: {:x}", address);
+                        VMError::IO(std::io::ErrorKind::InvalidInput)
+                    })?;
                 let code_size: u32 = meta.code.len() as u32;
                 log::debug!("code size: {}", code_size);
                 machine
@@ -865,8 +869,11 @@ impl<Mac: SupportMachine> RunContext<Mac> for CsalRunContext {
                 let address: H160 = vm_load_h160(machine, address_ptr)?;
                 let meta = self
                     .loader
-                    .load_contract_meta(ContractAddress(address))
-                    .map_err(|_err| VMError::IO(std::io::ErrorKind::InvalidInput))?;
+                    .load_contract_meta(ContractAddress(address.clone()))
+                    .map_err(|_err| {
+                        log::warn!("load contract meta failed: {:x}", address);
+                        VMError::IO(std::io::ErrorKind::InvalidInput)
+                    })?;
                 let done_size = std::cmp::min(meta.code.len() - code_offset, buffer_size);
                 let code_slice = &meta.code.as_ref()[code_offset..code_offset + done_size];
 

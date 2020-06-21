@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 #coding: utf-8
 
-import tempfile
 import json
 import sys
 import os
@@ -22,7 +21,8 @@ ckb_bin_path = sys.argv[2]
 ckb_rpc_url = sys.argv[3]
 polyjuice_rpc_url = sys.argv[4] if len(sys.argv) == 5 else "http://localhost:8214"
 ckb_dir = os.path.dirname(os.path.abspath(ckb_bin_path))
-script_dir = os.path.dirname(os.path.abspath(__file__))
+evm_contracts_dir = os.path.dirname(os.path.abspath(__file__))
+evm_contracts_dir = os.path.join(evm_contracts_dir, "evm-contracts")
 privkey1_path = os.path.join(target_dir, "{}.privkey".format(SENDER1))
 privkey2_path = os.path.join(target_dir, "{}.privkey".format(SENDER2))
 os.environ["API_URL"] = ckb_rpc_url
@@ -41,15 +41,17 @@ ERC20 = "ERC20"
 ERC721 = "KittyCore"
 CREATE_CONTRACT = "CreateContract"
 CALL_CONTRACT = "CallContract"
+CALL_MULTI = "CallMultipleTimes"
 
 contracts_binary = {
-    SIMPLE_STORAGE: "60806040525b607b60006000508190909055505b610018565b60db806100266000396000f3fe60806040526004361060295760003560e01c806360fe47b114602f5780636d4ce63c14605b576029565b60006000fd5b60596004803603602081101560445760006000fd5b81019080803590602001909291905050506084565b005b34801560675760006000fd5b50606e6094565b6040518082815260200191505060405180910390f35b8060006000508190909055505b50565b6000600060005054905060a2565b9056fea26469706673582212204e58804e375d4a732a7b67cce8d8ffa904fa534d4555e655a433ce0a5e0d339f64736f6c63430006060033",
-    LOG_EVENTS: "60806040525b3373ffffffffffffffffffffffffffffffffffffffff167f33b708096f325a28269900b1f9361f84aa77ba6ca085f6b114e4a070a8239d5234600160405180838152602001821515151581526020019250505060405180910390a25b610066565b60c1806100746000396000f3fe608060405260043610601f5760003560e01c806351973ec914602557601f565b60006000fd5b602b602d565b005b3373ffffffffffffffffffffffffffffffffffffffff167f33b708096f325a28269900b1f9361f84aa77ba6ca085f6b114e4a070a8239d5234600060405180838152602001821515151581526020019250505060405180910390a25b56fea2646970667358221220febe0ec5c064e995607c65adef058679ddef92d16e1fff35675fc3505f8f6b4564736f6c63430006060033",
-    SELF_DESTRUCT: "608060405260405161013c38038061013c833981810160405260208110156100275760006000fd5b81019080805190602001909291905050505b80600060006101000a81548173ffffffffffffffffffffffffffffffffffffffff021916908373ffffffffffffffffffffffffffffffffffffffff1602179055505b50610081565b60ad8061008f6000396000f3fe608060405234801560105760006000fd5b5060043610602c5760003560e01c8063ae8421e114603257602c565b60006000fd5b6038603a565b005b600060009054906101000a900473ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff16ff5b56fea2646970667358221220ead2c0723dcc5bc6fe1848ffcc748528c4f0638575fdee75e2c972c60fa1ea2d64736f6c63430006060033",
-    ERC20: open(os.path.join(script_dir, 'ERC20.bin'), 'r').read().strip(),
-    ERC721: open(os.path.join(script_dir, 'KittyCore.bin'), 'r').read().strip(),
-    CREATE_CONTRACT: open(os.path.join(script_dir, 'CreateContract.bin'), 'r').read().strip(),
-    CALL_CONTRACT: open(os.path.join(script_dir, 'CallContract.bin'), 'r').read().strip(),
+    SIMPLE_STORAGE: open(os.path.join(evm_contracts_dir, 'SimpleStorage.bin'), 'r').read().strip(),
+    LOG_EVENTS: open(os.path.join(evm_contracts_dir, 'LogEvents.bin'), 'r').read().strip(),
+    SELF_DESTRUCT: open(os.path.join(evm_contracts_dir, 'SelfDestruct.bin'), 'r').read().strip(),
+    ERC20: open(os.path.join(evm_contracts_dir, 'ERC20.bin'), 'r').read().strip(),
+    ERC721: open(os.path.join(evm_contracts_dir, 'KittyCore.bin'), 'r').read().strip(),
+    CREATE_CONTRACT: open(os.path.join(evm_contracts_dir, 'CreateContract.bin'), 'r').read().strip(),
+    CALL_CONTRACT: open(os.path.join(evm_contracts_dir, 'CallContract.bin'), 'r').read().strip(),
+    CALL_MULTI: open(os.path.join(evm_contracts_dir, 'CallMultipleTimes.bin'), 'r').read().strip(),
 }
 
 def send_jsonrpc(method, params):
@@ -222,11 +224,13 @@ def test_contract_create_contract():
     contract_address = create_contract_by_name(contract_name)
     print("[Finish]: {}\n".format(contract_name))
 
+
 def test_contract_call_contract():
     contract_name = CALL_CONTRACT
     print("[Start]: {}\n".format(contract_name))
     ss_address = create_contract_by_name(SIMPLE_STORAGE)
     print("create SimpleStorage contract({}) for {}".format(ss_address, contract_name))
+
     args = "000000000000000000000000{}".format(ss_address[2:])
     assert(len(args) == 64)
     contract_address = create_contract_by_name(contract_name, constructor_args=args)
