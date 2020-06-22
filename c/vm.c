@@ -31,8 +31,8 @@
 #include "vm_validator.h"
 #endif
 
-static uint32_t the_code_size = 0;
-static uint8_t *the_code_data = NULL;
+static uint32_t global_code_size = 0;
+static uint8_t *global_code_data = NULL;
 
 /// NOTE: This program must compile use g++ since evmone implemented with c++17
 int execute_vm(const uint8_t *source,
@@ -59,14 +59,14 @@ int execute_vm(const uint8_t *source,
     input_size = *(uint32_t *)(code_data + code_size);
     input_data = input_size > 0 ? code_data + (code_size + 4) : NULL;
 
-    the_code_size = code_size;
-    the_code_data = code_data;
+    global_code_size = code_size;
+    global_code_data = code_data;
   } else {
     input_size = *(uint32_t *)(source + CODE_OFFSET + 4);
     input_data = input_size > 0 ? ((uint8_t *)source + CODE_OFFSET + 8) : NULL;
 
-    code_size = the_code_size;
-    code_data = the_code_data;
+    code_size = global_code_size;
+    code_data = global_code_data;
   }
 
   const uint8_t *other_data = source + SIGNATURE_LEN + PROGRAM_LEN + program_len;
@@ -110,6 +110,11 @@ int execute_vm(const uint8_t *source,
 #endif
   if (ret != 0) {
     return ret;
+  }
+
+  if (msg.kind == EVMC_CREATE) {
+    global_code_size = res.output_size;
+    global_code_data = (uint8_t *)res.output_data;
   }
 
 #ifdef CSAL_VALIDATOR_TYPE
