@@ -108,6 +108,7 @@ impl Runner {
 }
 
 pub struct ContractInfo {
+    pub address: ContractAddress,
     pub tree: SparseMerkleTree<CkbBlake2bHasher, SmtH256, DefaultStore<SmtH256>>,
     pub code: Bytes,
     // input and selfdestruct can not both empty (invoke selfdestruct in a constructor?)
@@ -186,10 +187,12 @@ impl ExecuteRecord {
 
 impl ContractInfo {
     pub fn new(
+        address: ContractAddress,
         input: Option<ContractInput>,
         tree: SparseMerkleTree<CkbBlake2bHasher, SmtH256, DefaultStore<SmtH256>>,
     ) -> ContractInfo {
         ContractInfo {
+            address,
             input,
             tree,
             code: Bytes::default(),
@@ -205,7 +208,11 @@ impl ContractInfo {
     }
     // The contract code hash
     pub fn code_hash(&self) -> H256 {
-        assert!(!self.code.is_empty(), "contract code is empty");
+        assert!(
+            !self.code.is_empty(),
+            "contract code is empty: {:x}",
+            self.address.0
+        );
         H256::from_slice(&blake2b_256(self.code.as_ref())[..]).unwrap()
     }
 
@@ -538,7 +545,7 @@ impl CsalRunContext {
             info.add_record(program.clone());
         } else {
             self.contract_index = self.contracts.len();
-            let mut info = ContractInfo::new(contract_input_opt, tree);
+            let mut info = ContractInfo::new(destination.clone(), contract_input_opt, tree);
             info.add_record(program.clone());
             self.contracts.push((destination, info));
         }
@@ -735,7 +742,8 @@ impl<Mac: SupportMachine> RunContext<Mac> for CsalRunContext {
                 log::debug!("return_data: {}", hex::encode(&data));
                 let info = self.current_contract_info_mut();
                 info.current_record_mut().return_data = data.clone().into();
-                if info.is_create() {
+                if info.is_create() && info.execute_records.len() == 1 {
+                    log::debug!("update code for contract: {:x}", info.address.0);
                     info.code = data.into();
                 }
                 Ok(true)
@@ -847,14 +855,13 @@ impl<Mac: SupportMachine> RunContext<Mac> for CsalRunContext {
                 let address_ptr = machine.registers()[A0].to_u64();
                 let address: H160 = vm_load_h160(machine, address_ptr)?;
                 let code_size_ptr = machine.registers()[A1].to_u64();
-                let meta = self
-                    .loader
-                    .load_contract_meta(ContractAddress(address.clone()))
+                let code = self
+                    .get_contract_code(&ContractAddress(address.clone()))
                     .map_err(|_err| {
-                        log::warn!("load contract meta failed: {:x}", address);
+                        log::warn!("load contract code failed: {:x}", address);
                         VMError::IO(std::io::ErrorKind::InvalidInput)
                     })?;
-                let code_size: u32 = meta.code.len() as u32;
+                let code_size: u32 = code.len() as u32;
                 log::debug!("code size: {}", code_size);
                 machine
                     .memory_mut()
@@ -871,15 +878,14 @@ impl<Mac: SupportMachine> RunContext<Mac> for CsalRunContext {
                 let done_size_ptr = machine.registers()[A4].to_u64();
 
                 let address: H160 = vm_load_h160(machine, address_ptr)?;
-                let meta = self
-                    .loader
-                    .load_contract_meta(ContractAddress(address.clone()))
+                let code = self
+                    .get_contract_code(&ContractAddress(address.clone()))
                     .map_err(|_err| {
-                        log::warn!("load contract meta failed: {:x}", address);
+                        log::warn!("load contract code failed: {:x}", address);
                         VMError::IO(std::io::ErrorKind::InvalidInput)
                     })?;
-                let done_size = std::cmp::min(meta.code.len() - code_offset, buffer_size);
-                let code_slice = &meta.code.as_ref()[code_offset..code_offset + done_size];
+                let done_size = std::cmp::min(code.len() - code_offset, buffer_size);
+                let code_slice = &code.as_ref()[code_offset..code_offset + done_size];
 
                 log::debug!("code done size: {}", done_size);
                 log::debug!("code slice: {}", hex::encode(code_slice));

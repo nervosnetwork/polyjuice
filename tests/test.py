@@ -79,11 +79,11 @@ def create_contract(binary, constructor_args="", sender=SENDER1):
     return result
 
 def call_contract(contract_address, args, is_static=False, sender=SENDER1):
-    print("[call contract]:")
+    method = "static_call" if is_static else "call"
+    print("[{} contract]:".format(method))
     print("   sender = {}".format(sender))
     print("  address = {}".format(contract_address))
     print("     args = {}".format(args))
-    method = "static_call" if is_static else "call"
     return send_jsonrpc(method, [sender, contract_address, args])
 
 def run_cmd(cmd, print_output=True):
@@ -221,7 +221,15 @@ def test_erc721_kitty_core():
 def test_contract_create_contract():
     contract_name = CREATE_CONTRACT
     print("[Start]: {}\n".format(contract_name))
-    contract_address = create_contract_by_name(contract_name)
+
+    result = create_contract(contracts_binary[contract_name])
+    action_name = "create-{}".format(contract_name)
+    commit_tx(result, action_name)
+
+    ss_address = result["created_addresses"][1]
+    static_call_args = "0x6d4ce63c"
+    result = call_contract(ss_address, static_call_args, is_static=True)
+    assert(result["return_data"] == "0x00000000000000000000000000000000000000000000000000000000000000ff")
     print("[Finish]: {}\n".format(contract_name))
 
 
