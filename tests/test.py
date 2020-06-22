@@ -42,6 +42,7 @@ ERC721 = "KittyCore"
 CREATE_CONTRACT = "CreateContract"
 CALL_CONTRACT = "CallContract"
 CALL_MULTI = "CallMultipleTimes"
+CALL_SELFDESTRUCT = "CallSelfDestruct"
 
 contracts_binary = {
     SIMPLE_STORAGE: open(os.path.join(evm_contracts_dir, 'SimpleStorage.bin'), 'r').read().strip(),
@@ -52,6 +53,7 @@ contracts_binary = {
     CREATE_CONTRACT: open(os.path.join(evm_contracts_dir, 'CreateContract.bin'), 'r').read().strip(),
     CALL_CONTRACT: open(os.path.join(evm_contracts_dir, 'CallContract.bin'), 'r').read().strip(),
     CALL_MULTI: open(os.path.join(evm_contracts_dir, 'CallMultipleTimes.bin'), 'r').read().strip(),
+    CALL_SELFDESTRUCT: open(os.path.join(evm_contracts_dir, 'CallSelfDestruct.bin'), 'r').read().strip(),
 }
 
 def send_jsonrpc(method, params):
@@ -277,6 +279,22 @@ def test_call_multiple_times():
     print("[Finish]: {}\n".format(contract_name))
 
 
+def test_call_selfdestruct():
+    contract_name = CALL_SELFDESTRUCT
+    print("[Start]: {}\n".format(contract_name))
+
+    destruct_address = create_contract_by_name(SELF_DESTRUCT, "000000000000000000000000b2e61ff569acf041b3c2c17724e2379c581eeac3")
+    contract_address = create_contract_by_name(contract_name)
+
+    call_args = "0x9a33d968000000000000000000000000{}".format(destruct_address[2:])
+    result = call_contract(contract_address, call_args)
+    action_name = "call-{}-{}-{}".format(contract_name, contract_address, call_args)
+    commit_tx(result, action_name[:42])
+    target_output = result["tx"]["outputs"][1]
+    assert(target_output["lock"]["args"] == "0xb2e61ff569acf041b3c2c17724e2379c581eeac3", "beneficiary address not match")
+    assert(target_output["type"] is None, "beneficiary type script not null")
+    print("[Finish]: {}\n".format(contract_name))
+
 def main():
     test_simple_storage()
     test_log_events()
@@ -286,6 +304,7 @@ def main():
     test_contract_create_contract()
     test_contract_call_contract()
     test_call_multiple_times()
+    test_call_selfdestruct()
 
 if __name__ == "__main__":
     main()
