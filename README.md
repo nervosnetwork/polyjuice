@@ -4,6 +4,23 @@ Nervos CKB is built on the cell model, which is a generalized version of the UTX
 
 That is also just our claim, as engineers we all know the famous quote "Talk is cheap. Show me the code." Following this principle, we designed and built polyjuice, which is an Ethereum compatible layer on top of Nervos CKB. Ethereum, up to this day, is probably the most used and flexible account model based blockchain. By polyjuice we want to showcase that it is perfectly possible to use account model on Nervos CKB. The flexibility here actually enables countless opportunities.
 
+# Features
+- [x] Contract creation
+- [x] Contract destruction
+- [x] Contract call contract
+- [x] Contract logs
+- [ ] Read block information from contract
+- [ ] Value transfer
+
+Polyjuice use [evmone](https://github.com/ethereum/evmone) as the EVM implementation in both `generator` and `validator`, almost all opcodes are supported except:
+
+* `BLOCKHASH` (will be supported soon)
+* `COINBASE`  (will **NOT** be supported)
+* `TIMESTAMP` (will be supported soon)
+* `NUMBER` (will be supported soon)
+* `DIFFICULTY` (will be supported soon)
+* `GASLIMIT` (will be supported soon)
+
 # A short tutorial
 
 **NOTE** : The tutorial currently only tested on Ubuntu 18.04.
