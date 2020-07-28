@@ -148,8 +148,8 @@ void selfdestruct(struct evmc_host_context* context,
 
 struct evmc_result call(struct evmc_host_context* context,
                         const struct evmc_message* msg) {
-  uint8_t result_data[10 * 1024];
-  uint8_t msg_data[10 * 1024];
+  uint8_t result_data[100 * 1024];
+  uint8_t msg_data[100 * 1024];
   uint8_t *msg_ptr = msg_data;
 
   debug_print_int("kind", (int)msg->kind);

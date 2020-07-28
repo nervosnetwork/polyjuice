@@ -51,6 +51,7 @@ int main(int argc, char *argv[]) {
   const char *length_hex = argv[1];
   const char *binary_hex = argv[2];
 
+  /* 100KB */
   char buffer[100 * 1024];
   char part1;
   char part2;

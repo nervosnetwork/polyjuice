@@ -385,12 +385,14 @@ int contract_info_reach_program(const contract_info *sender_info,
   const contract_program *sender_program = sender_info->current_program;
   const call_record call = sender_program->calls[sender_program->call_index];
 
-  if (call.program_index > dest_info->program_index) {
+  if (dest_info->program_index > call.program_index) {
+    debug_print_int("call.program_index", call.program_index);
+    debug_print_int("dest_info->program_index", dest_info->program_index);
     ckb_debug("destination contract already passed the program");
     return -99;
   }
   int ret;
-  for (size_t i = call.program_index; i < dest_info->program_index; i++) {
+  for (size_t i = dest_info->program_index; i < call.program_index; i++) {
     ret = contract_info_next_program(dest_info);
     if (ret != CKB_SUCCESS) {
       return ret;

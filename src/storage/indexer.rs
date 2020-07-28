@@ -811,7 +811,7 @@ impl<Mac: SupportMachine> RunContext<Mac> for ContractExtractor {
                 msg_data_address += 4;
                 let _gas: i64 = vm_load_i64(machine, msg_data_address)?;
                 msg_data_address += 8;
-                let destination: H160 = vm_load_h160(machine, msg_data_address)?;
+                let msg_destination: H160 = vm_load_h160(machine, msg_data_address)?;
                 msg_data_address += 20;
                 let _sender: H160 = vm_load_h160(machine, msg_data_address)?;
                 msg_data_address += 20;
@@ -822,18 +822,24 @@ impl<Mac: SupportMachine> RunContext<Mac> for ContractExtractor {
                 let _value: H256 = vm_load_h256(machine, msg_data_address)?;
 
                 let kind = CallKind::try_from(kind_value).unwrap();
-                let destination = if kind == CallKind::CREATE {
-                    let info_mut = self
-                        .script_groups
-                        .get_mut(&self.current_contract)
-                        .expect("can not find current contract");
-                    let addr = info_mut.current_witness().calls[info_mut.call_index]
-                        .0
-                        .clone();
-                    info_mut.call_index += 1;
-                    addr
-                } else {
-                    ContractAddress(destination)
+
+                if kind != CallKind::CREATE && kind != CallKind::CALL {
+                    panic!("Unsupported call: {:?}", kind);
+                }
+
+                let info_mut = self
+                    .script_groups
+                    .get_mut(&self.current_contract)
+                    .expect("can not find current contract");
+                let destination = info_mut.current_witness().calls[info_mut.call_index]
+                    .0
+                    .clone();
+                info_mut.call_index += 1;
+                if kind == CallKind::CALL {
+                    assert_eq!(
+                        destination.0, msg_destination,
+                        "destination address not match"
+                    );
                 };
                 let saved_current_contract = self.current_contract.clone();
                 let return_data = self
