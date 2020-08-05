@@ -216,6 +216,7 @@ echo '{
   "destructed_addresses": [],
   "logs": [],
   "return_data": "0x6060604 ...... 806500029",
+  "tx_hash": "0x1111111111111111111111111111111111111111111111111111111111111111",
   "tx": {
     "cell_deps": [
       {
@@ -461,7 +462,8 @@ echo '{
     }
   ],
   "return_data": null,
-  "tx": { ... }
+  "tx": { ... },
+  "tx_hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
 }
 
 ```
@@ -575,6 +577,7 @@ fn get_logs(
 ``` rust
 struct TransactionReceipt {
     tx: CkbTransaction,
+    tx_hash: H256,
     entrance_contract: H160,
     /// The newly created contract's address
     created_addresses: Vec<H160>,

@@ -2,7 +2,7 @@ use crate::storage::{CsalRunContext, Loader, Runner};
 use crate::types::{ContractAddress, ContractChange, ContractMeta, EoaAddress, RunConfig};
 use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::{JsonBytes, Transaction};
-use ckb_types::{bytes::Bytes, H160, H256};
+use ckb_types::{bytes::Bytes, prelude::*, H160, H256};
 use jsonrpc_core::{Error, ErrorCode, Result as RpcResult};
 use jsonrpc_derive::rpc;
 use serde::{Deserialize, Serialize};
@@ -287,6 +287,7 @@ impl LogEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransactionReceipt {
     pub tx: Transaction,
+    pub tx_hash: H256,
     pub entrance_contract: ContractAddress,
     /// The newly created contract's address
     pub created_addresses: Vec<ContractAddress>,
@@ -300,6 +301,7 @@ impl TryFrom<CsalRunContext> for TransactionReceipt {
     type Error = String;
     fn try_from(mut context: CsalRunContext) -> Result<TransactionReceipt, String> {
         let tx = context.build_tx().map_err(|err| err.to_string())?;
+        let tx_hash: H256 = tx.calc_tx_hash().unpack();
         let entrance_contract = context.entrance_contract();
         let created_addresses = context.created_contracts();
         let destructed_addresses = context.destructed_contracts();
@@ -315,6 +317,7 @@ impl TryFrom<CsalRunContext> for TransactionReceipt {
         };
         Ok(TransactionReceipt {
             tx: Transaction::from(tx),
+            tx_hash,
             entrance_contract,
             created_addresses,
             destructed_addresses,
