@@ -64,6 +64,7 @@ jsonrpc!(pub struct RawHttpRpcClient {
     // Chain
     pub fn get_block(&mut self, hash: H256) -> Option<BlockView>;
     pub fn get_epoch_by_number(&mut self, number: EpochNumber) -> Option<EpochView>;
+    pub fn get_header(&mut self, hash: H256) -> Option<HeaderView>;
     pub fn get_header_by_number(&mut self, number: BlockNumber) -> Option<HeaderView>;
     pub fn get_live_cell(&mut self, out_point: OutPoint, with_data: bool) -> CellWithStatus;
     pub fn get_tip_block_number(&mut self) -> BlockNumber;
@@ -100,6 +101,9 @@ impl HttpRpcClient {
         self.client
             .get_epoch_by_number(EpochNumber::from(number))
             .map_err(|err| err.to_string())
+    }
+    pub fn get_header(&mut self, hash: H256) -> Result<Option<HeaderView>, String> {
+        self.client.get_header(hash).map_err(|err| err.to_string())
     }
     pub fn get_header_by_number(&mut self, number: u64) -> Result<Option<HeaderView>, String> {
         self.client

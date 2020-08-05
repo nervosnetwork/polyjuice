@@ -9,6 +9,7 @@
 #define _CSAL_CALL_SYSCALL_NUMBER 3078
 #define _CSAL_GET_CODE_SIZE_SYSCALL_NUMBER 3079
 #define _CSAL_COPY_CODE_SYSCALL_NUMBER 3080
+#define _CSAL_GET_TX_CONTEXT 3081
 
 static char debug_buffer[64 * 1024];
 static void debug_print_data(const char *prefix,
@@ -22,8 +23,8 @@ static void debug_print_data(const char *prefix,
   debug_buffer[offset] = '\0';
   ckb_debug(debug_buffer);
 }
-static void debug_print_int(const char *prefix, int ret) {
-  sprintf(debug_buffer, "%s => %d", prefix, ret);
+static void debug_print_int(const char *prefix, int64_t ret) {
+  sprintf(debug_buffer, "%s => %ld", prefix, ret);
   ckb_debug(debug_buffer);
 }
 
@@ -45,6 +46,10 @@ int csal_get_code_size(uint8_t *address, uint32_t *code_size) {
 int csal_copy_code(uint8_t *address, uint32_t code_offset, uint8_t *buffer_data, uint32_t buffer_size, uint32_t *done_size) {
   return syscall(_CSAL_COPY_CODE_SYSCALL_NUMBER, address, code_offset, buffer_data, buffer_size, done_size, 0);
 }
+int csal_get_tx_context(uint8_t *buffer) {
+  return syscall(_CSAL_GET_TX_CONTEXT, buffer, 0, 0, 0, 0, 0);
+}
+
 
 void release_result(const struct evmc_result* result) {
   free((void *)result->output_data);
@@ -61,6 +66,22 @@ struct evmc_host_context {
 struct evmc_tx_context get_tx_context(struct evmc_host_context* context) {
   struct evmc_tx_context ctx{};
   ctx.tx_origin = context->tx_origin;
+
+  uint8_t buffer[1024];
+  int ret = csal_get_tx_context(buffer);
+  if (ret != 0) {
+    ckb_debug("csal_get_tx_context error");
+  }
+  uint8_t *ctx_ptr = buffer;
+  uint64_t block_number = *(uint64_t *)ctx_ptr;
+  ctx_ptr += 8;
+  uint64_t block_timestamp = *(uint64_t *)ctx_ptr;
+  debug_print_int("[block number]", block_number);
+  debug_print_int("[block timestamp]", block_timestamp);
+  ctx.block_number = (int64_t)block_number;
+  ctx.block_timestamp = (int64_t)block_timestamp;
+  /* int64_t::MAX */
+  ctx.block_gas_limit = 9223372036854775807;
   return ctx;
 }
 

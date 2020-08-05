@@ -4,7 +4,7 @@ use ckb_simple_account_layer::{
 };
 use ckb_types::{
     bytes::{BufMut, Bytes, BytesMut},
-    core::{ScriptHashType, TransactionBuilder},
+    core::{HeaderView, ScriptHashType, TransactionBuilder},
     packed::{
         BytesOpt, CellInput, CellOutput, OutPoint, Script, ScriptOpt, Transaction, WitnessArgs,
     },
@@ -16,6 +16,7 @@ use ckb_vm::{
     Error as VMError, Memory, Register, SupportMachine,
 };
 use sparse_merkle_tree::{default_store::DefaultStore, SparseMerkleTree, H256 as SmtH256};
+use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::error::Error as StdError;
 
@@ -56,7 +57,9 @@ impl Runner {
             false,
         );
 
-        let mut context = CsalRunContext::new(self.loader.clone(), self.run_config.clone());
+        let tip_header = self.loader.load_tip_header()?;
+        let mut context =
+            CsalRunContext::new(self.loader.clone(), self.run_config.clone(), tip_header);
         if let Err(err) = context.run(program) {
             log::warn!("Error: {:?}", err);
             return Err(err);
@@ -84,7 +87,9 @@ impl Runner {
             false,
         );
 
-        let mut context = CsalRunContext::new(self.loader.clone(), self.run_config.clone());
+        let tip_header = self.loader.load_tip_header()?;
+        let mut context =
+            CsalRunContext::new(self.loader.clone(), self.run_config.clone(), tip_header);
         if let Err(err) = context.run(program) {
             log::warn!("Error: {:?}", err);
             return Err(err);
@@ -98,7 +103,9 @@ impl Runner {
         code: Bytes,
     ) -> Result<CsalRunContext, Box<dyn StdError>> {
         let program = Program::new_create(EoaAddress(sender.clone()), sender, code);
-        let mut context = CsalRunContext::new(self.loader.clone(), self.run_config.clone());
+        let tip_header = self.loader.load_tip_header()?;
+        let mut context =
+            CsalRunContext::new(self.loader.clone(), self.run_config.clone(), tip_header);
         if let Err(err) = context.run(program) {
             log::warn!("Error: {:?}", err);
             return Err(err);
@@ -300,6 +307,7 @@ impl ContractInfo {
 pub struct CsalRunContext {
     pub loader: Loader,
     pub run_config: RunConfig,
+    pub tip_header: HeaderView,
     // The transaction origin address
     pub tx_origin: EoaAddress,
     // First fuel input cell
@@ -315,10 +323,11 @@ pub struct CsalRunContext {
 }
 
 impl CsalRunContext {
-    pub fn new(loader: Loader, run_config: RunConfig) -> CsalRunContext {
+    pub fn new(loader: Loader, run_config: RunConfig, tip_header: HeaderView) -> CsalRunContext {
         CsalRunContext {
             loader,
             run_config,
+            tip_header,
             tx_origin: Default::default(),
             first_fuel_input: None,
             first_contract_input: None,
@@ -460,6 +469,17 @@ impl CsalRunContext {
             outputs_data.push(Bytes::default());
         }
 
+        let tip_header_hash: H256 = self.tip_header.hash().unpack();
+        let mut header_deps = self
+            .loader
+            .load_header_deps(&inputs)?
+            .into_iter()
+            .filter(|hash| hash != &tip_header_hash)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        header_deps.insert(0, tip_header_hash);
+
         // Collect witnesses, and give them correct positions
         let mut input_index = if self.first_fuel_input.is_some() {
             1
@@ -492,6 +512,7 @@ impl CsalRunContext {
         }
 
         let tx = TransactionBuilder::default()
+            .header_deps(header_deps.into_iter().map(|hash| hash.pack()))
             .cell_deps(cell_deps.pack())
             .inputs(inputs.pack())
             .outputs(outputs.pack())
@@ -895,6 +916,18 @@ impl<Mac: SupportMachine> RunContext<Mac> for CsalRunContext {
                 machine
                     .memory_mut()
                     .store_bytes(done_size_ptr, &(done_size as u32).to_le_bytes()[..])?;
+                machine.set_register(A0, Mac::REG::from_u8(0));
+                Ok(true)
+            }
+            3081 => {
+                let buffer_ptr = machine.registers()[A0].to_u64();
+                let mut data = [0u8; 16];
+                let number = self.tip_header.number();
+                let timestamp = self.tip_header.timestamp() / 1000;
+                log::debug!("number: {}, timestamp: {}", number, timestamp);
+                data[0..8].copy_from_slice(&number.to_le_bytes());
+                data[8..16].copy_from_slice(&timestamp.to_le_bytes());
+                machine.memory_mut().store_bytes(buffer_ptr, &data[..])?;
                 machine.set_register(A0, Mac::REG::from_u8(0));
                 Ok(true)
             }

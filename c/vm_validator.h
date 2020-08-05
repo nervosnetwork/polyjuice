@@ -46,6 +46,7 @@ int check_script_code(const uint8_t *script_data_a,
 }
 
 #define MAX_CONTRACT_COUNT 64
+#define HEADER_SIZE 4096
 
 typedef struct {
   evmc_address destination;
@@ -97,9 +98,9 @@ typedef struct {
 static bool global_touched = false;
 static contract_info global_info_list[MAX_CONTRACT_COUNT];
 static size_t global_info_count = 0;
-static evmc_address global_tx_origin{};
 static evmc_address global_current_contract;
 static bool global_current_is_main = false;
+static struct evmc_tx_context global_tx_context;
 
 int call_record_load(call_record *record, const uint8_t *buf, const size_t buf_size) {
   if (buf_size < 24) {
@@ -505,16 +506,13 @@ int contract_info_call(const contract_info *sender_info,
 struct evmc_host_context {
   csal_change_t *existing_values;
   csal_change_t *changes;
-  evmc_address tx_origin;
   /* selfdestruct beneficiary */
   evmc_address beneficiary;
   bool destructed;
 };
 
 struct evmc_tx_context get_tx_context(struct evmc_host_context* context) {
-  struct evmc_tx_context ctx{};
-  ctx.tx_origin = context->tx_origin;
-  return ctx;
+  return global_tx_context;
 }
 
 bool account_exists(struct evmc_host_context* context,
@@ -630,7 +628,7 @@ struct evmc_result call(struct evmc_host_context* context,
   }
 
   if (global_current_is_main) {
-    ret = contract_info_call(sender_info, dest_info, &context->tx_origin, msg, &res);
+    ret = contract_info_call(sender_info, dest_info, &global_tx_context.tx_origin, msg, &res);
     if (ret != CKB_SUCCESS) {
       res.status_code = EVMC_REVERT;
       return res;
@@ -647,7 +645,7 @@ struct evmc_result call(struct evmc_host_context* context,
       res.status_code = EVMC_REVERT;
       return res;
     }
-    ret = contract_info_call(sender_info, dest_info, &context->tx_origin, msg, &res);
+    ret = contract_info_call(sender_info, dest_info, &global_tx_context.tx_origin, msg, &res);
     if (ret != CKB_SUCCESS) {
       res.status_code = EVMC_REVERT;
       return res;
@@ -903,7 +901,7 @@ inline int verify_params(const uint8_t *signature_data,
             global_current_is_main = true;
           }
           info->is_main = true;
-          memcpy(global_tx_origin.bytes, current_program->tx_origin.bytes, 20);
+          memcpy(global_tx_context.tx_origin.bytes, current_program->tx_origin.bytes, 20);
           has_entrance_signature = true;
         }
         current_program = current_program->next_program;
@@ -956,6 +954,72 @@ inline int verify_params(const uint8_t *signature_data,
         return ret;
       }
     }
+
+    /* Load latest header information */
+    uint64_t max_number = 0;
+    uint8_t header_buffer[HEADER_SIZE];
+    input_index = 0;
+    while(1) {
+      len = HEADER_SIZE;
+      ret = ckb_load_header(header_buffer, &len, 0, input_index, CKB_SOURCE_INPUT);
+      if (ret == CKB_INDEX_OUT_OF_BOUND) {
+        ckb_debug("load headers finised");
+        break;
+      } else if (ret != CKB_SUCCESS) {
+        return ret;
+      }
+      if (len > HEADER_SIZE) {
+        /* buffer not enough */
+        return -10;
+      }
+      mol_seg_t header_seg;
+      header_seg.ptr = (uint8_t *)header_buffer;
+      header_seg.size = len;
+      mol_seg_t raw_seg = MolReader_Header_get_raw(&header_seg);
+      mol_seg_t block_number_seg = MolReader_RawHeader_get_number(&raw_seg);
+      uint64_t block_number = *((uint64_t *)block_number_seg.ptr);
+      if (block_number > max_number) {
+        max_number = block_number;
+      }
+      input_index += 1;
+    }
+
+    len = HEADER_SIZE;
+    ret = ckb_load_header(header_buffer, &len, 0, 0, CKB_SOURCE_HEADER_DEP);
+    if (ret != CKB_SUCCESS) {
+      return ret;
+    }
+    if (len > HEADER_SIZE) {
+      /* buffer not enough */
+      return -10;
+    }
+
+    mol_seg_t header_seg;
+    header_seg.ptr = (uint8_t *)header_buffer;
+    header_seg.size = len;
+    mol_seg_t raw_seg = MolReader_Header_get_raw(&header_seg);
+    /* Timestamp */
+    mol_seg_t timestamp_seg = MolReader_RawHeader_get_timestamp(&raw_seg);
+    uint64_t timestamp = *((uint64_t *)timestamp_seg.ptr) / 1000;
+    /* Block Number */
+    mol_seg_t block_number_seg = MolReader_RawHeader_get_number(&raw_seg);
+    uint64_t block_number = *((uint64_t *)block_number_seg.ptr);
+    if (block_number < max_number) {
+      ckb_debug("First header too old");
+      return -11;
+    }
+
+    /* gas_price = 0 */
+    memset(global_tx_context.tx_gas_price.bytes, 0, 20);
+    /* already exists */
+    global_tx_context.block_number = (int64_t)block_number;
+    global_tx_context.block_timestamp = (int64_t)timestamp;
+    /* int64_t::MAX */
+    global_tx_context.block_gas_limit = 9223372036854775807;
+    /* TODO tx_gas_price */
+    /* TODO block_coinbase */
+    /* TODO block_difficulty */
+    /* TODO chain_id */
   }
 
   /* Verify sender by signature field */
@@ -1043,7 +1107,7 @@ inline int verify_params(const uint8_t *signature_data,
   }
 
   /* Verify tx_origin all the same */
-  if (memcmp(global_tx_origin.bytes, tx_origin->bytes, 20) != 0) {
+  if (memcmp(global_tx_context.tx_origin.bytes, tx_origin->bytes, 20) != 0) {
     /* tx_origin not the same */
     return -97;
   }
@@ -1069,7 +1133,6 @@ inline void context_init(struct evmc_host_context* context,
                          csal_change_t *changes) {
   context->existing_values = existing_values;
   context->changes = changes;
-  context->tx_origin = tx_origin;
   context->destructed = false;
   memset(context->beneficiary.bytes, 0, 20);
 }

@@ -2,7 +2,7 @@ use bincode::deserialize;
 use ckb_jsonrpc_types as json_types;
 use ckb_types::{
     bytes::Bytes,
-    core::{EpochNumberWithFraction, ScriptHashType},
+    core::{EpochNumberWithFraction, HeaderView, ScriptHashType},
     packed,
     prelude::*,
     H256, U256,
@@ -39,13 +39,16 @@ impl Loader {
         output_index: u32,
     ) -> Result<(packed::CellOutput, Bytes), String> {
         let out_point = json_types::OutPoint {
-            tx_hash,
+            tx_hash: tx_hash.clone(),
             index: json_types::Uint32::from(output_index),
         };
         let cell_with_status = self.client.get_live_cell(out_point, true)?;
-        let cell = cell_with_status
-            .cell
-            .ok_or_else(|| String::from("contract cell is not live cell"))?;
+        let cell = cell_with_status.cell.ok_or_else(|| {
+            format!(
+                "contract cell is not live cell, tx_hash={:x}, output_index={}",
+                tx_hash, output_index
+            )
+        })?;
         Ok((cell.output.into(), cell.data.unwrap().content.into_bytes()))
     }
 
@@ -350,6 +353,25 @@ impl Loader {
             }
         }
         Ok(all_logs)
+    }
+
+    pub fn load_header_deps(&mut self, inputs: &[packed::CellInput]) -> Result<Vec<H256>, String> {
+        inputs
+            .iter()
+            .map(|input| {
+                let tx_hash = Unpack::<H256>::unpack(&input.previous_output().tx_hash());
+                self.client
+                    .get_transaction(tx_hash.clone())?
+                    .ok_or_else(|| format!("Transaction not found for input: {:?}", input))?
+                    .tx_status
+                    .block_hash
+                    .ok_or_else(|| format!("Transaction not committed: {:x}", tx_hash))
+            })
+            .collect()
+    }
+
+    pub fn load_tip_header(&mut self) -> Result<HeaderView, String> {
+        self.client.get_tip_header().map(HeaderView::from)
     }
 }
 

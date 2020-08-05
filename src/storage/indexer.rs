@@ -382,17 +382,25 @@ impl Indexer {
                     added_cells.insert((lock_hash, tx_index as u32, output_index as u32, value));
                 }
 
-                if let Some(mut extractor) = ContractExtractor::init(
-                    self.run_config.clone(),
-                    tx_hash,
-                    tx_index as u32,
-                    tx.witnesses,
-                    script_groups,
-                )? {
-                    extractor.run().map_err(|err| err.to_string())?;
-                    block_changes.extend(extractor.get_contract_changes(next_number));
-                    block_codes.extend(extractor.get_created_contracts());
-                    destructed_contracts.extend(extractor.get_destructed_contracts());
+                if let Some(tip_block_hash) = tx.header_deps.get(0) {
+                    let tip_header = self
+                        .client
+                        .get_header(tip_block_hash.clone())?
+                        .map(core::HeaderView::from)
+                        .expect("block not exists");
+                    if let Some(mut extractor) = ContractExtractor::init(
+                        self.run_config.clone(),
+                        tip_header,
+                        tx_hash,
+                        tx_index as u32,
+                        tx.witnesses,
+                        script_groups,
+                    )? {
+                        extractor.run().map_err(|err| err.to_string())?;
+                        block_changes.extend(extractor.get_contract_changes(next_number));
+                        block_codes.extend(extractor.get_created_contracts());
+                        destructed_contracts.extend(extractor.get_destructed_contracts());
+                    }
                 }
             }
 
@@ -516,6 +524,7 @@ impl Indexer {
 //   3. produce SELFDESTRUCT contracts
 pub struct ContractExtractor {
     run_config: RunConfig,
+    tip_header: core::HeaderView,
     tx_hash: H256,
     tx_index: u32,
     entrance_contract: ContractAddress,
@@ -630,6 +639,7 @@ impl ContractInfo {
 impl ContractExtractor {
     pub fn init(
         run_config: RunConfig,
+        tip_header: core::HeaderView,
         tx_hash: H256,
         tx_index: u32,
         witnesses: Vec<JsonBytes>,
@@ -686,6 +696,7 @@ impl ContractExtractor {
             let current_contract = entrance_contract.clone();
             ContractExtractor {
                 run_config,
+                tip_header,
                 tx_hash,
                 tx_index,
                 entrance_contract,
@@ -907,6 +918,19 @@ impl<Mac: SupportMachine> RunContext<Mac> for ContractExtractor {
                 machine
                     .memory_mut()
                     .store_bytes(done_size_ptr, &(done_size as u32).to_le_bytes()[..])?;
+                machine.set_register(A0, Mac::REG::from_u8(0));
+                Ok(true)
+            }
+            // evmc_tx_context {block_number, block_timestamp}
+            3081 => {
+                let buffer_ptr = machine.registers()[A0].to_u64();
+                let mut data = [0u8; 16];
+                let number = self.tip_header.number();
+                let timestamp = self.tip_header.timestamp() / 1000;
+                log::debug!("number: {}, timestamp: {}", number, timestamp);
+                data[0..8].copy_from_slice(&number.to_le_bytes());
+                data[8..16].copy_from_slice(&timestamp.to_le_bytes());
+                machine.memory_mut().store_bytes(buffer_ptr, &data[..])?;
                 machine.set_register(A0, Mac::REG::from_u8(0));
                 Ok(true)
             }
