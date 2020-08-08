@@ -3,9 +3,8 @@
 set -eu
 set -x
 
-BRANCH="v0.33.0-pre1"
-CKB_CLI_VERSION="v0.33.1"
-API_URL="http://localhost:9114"
+CKB_BRANCH="v0.33.0-pre1"
+CKB_CLI_VERSION="v0.34.0"
 POLYJUICE_LISTEN="127.0.0.1:9214"
 POLYJUICE_URL="http://${POLYJUICE_LISTEN}"
 
@@ -15,18 +14,21 @@ CKB_PID=${INTEGRATION_ROOT}/ckb.pid
 POLYJUICE_PID=${INTEGRATION_ROOT}/polyjuice.pid
 PATH=${PWD}/target/release:${INTEGRATION_ROOT}:${PATH}
 
+export API_URL="http://localhost:9114"
+export CKB_CLI_HOME="${INTEGRATION_ROOT}/ckb-cli-home"
+
 # Download and start ckb
 DEV_CHAIN_DIR=${INTEGRATION_ROOT}/dev-chain
 rm -rf ${DEV_CHAIN_DIR}
 mkdir -p ${DEV_CHAIN_DIR}
-CKB_TAR_FILENAME="ckb_${BRANCH}_x86_64-unknown-linux-gnu.tar.gz"
+CKB_TAR_FILENAME="ckb_${CKB_BRANCH}_x86_64-unknown-linux-gnu.tar.gz"
 if [ ! -f ${INTEGRATION_ROOT}/${CKB_TAR_FILENAME} ]; then
     cd ${INTEGRATION_ROOT}
-    curl -L -O "https://github.com/nervosnetwork/ckb/releases/download/${BRANCH}/${CKB_TAR_FILENAME}"
+    curl -L -O "https://github.com/nervosnetwork/ckb/releases/download/${CKB_BRANCH}/${CKB_TAR_FILENAME}"
     tar -xzf ${CKB_TAR_FILENAME}
 fi
 
-cp ${INTEGRATION_ROOT}/ckb_${BRANCH}_x86_64-unknown-linux-gnu/ckb ${DEV_CHAIN_DIR}
+cp ${INTEGRATION_ROOT}/ckb_${CKB_BRANCH}_x86_64-unknown-linux-gnu/ckb ${DEV_CHAIN_DIR}
 ${DEV_CHAIN_DIR}/ckb --version
 
 cd ${DEV_CHAIN_DIR}
@@ -44,6 +46,8 @@ echo $! > ${CKB_PID}
 sleep 1
 CKB_BIN=${DEV_CHAIN_DIR}/ckb
 
+rm -rf ${CKB_CLI_HOME}
+mkdir -p ${CKB_CLI_HOME}
 # Downlaod ckb-cli
 CKB_CLI_TAR_FILENAME="ckb-cli_${CKB_CLI_VERSION}_x86_64-unknown-linux-gnu.tar.gz"
 if [ ! -f ${INTEGRATION_ROOT}/${CKB_CLI_TAR_FILENAME} ]; then
@@ -60,14 +64,13 @@ cd ${PROJECT_ROOT}/c
 make all-via-docker
 
 # Deploy contracts
-rm -rf ${HOME}/.ckb-cli/index-v1/0x823b2ff5785b12da8b1363cac9a5cbe566d8b715a4311441b119c39a0367488c
 PRIVKEY_PATH=${INTEGRATION_ROOT}/privkey-0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7
 echo "d00c06bfd800d27397002dca6fb0993d5ba6399b4238b2f29ee9deb97593d2bc" > ${PRIVKEY_PATH}
 
 # 1. deploy always_success
 ${CKB_BIN} miner -C ${DEV_CHAIN_DIR} -l 1
 ALWAYS_SUCCESS_TX_HASH_PATH=${INTEGRATION_ROOT}/tx_hash_always_success
-ckb-cli --url ${API_URL} wallet transfer \
+ckb-cli wallet transfer \
         --privkey-path ${PRIVKEY_PATH} \
         --to-address ckt1qyqdfjzl8ju2vfwjtl4mttx6me09hayzfldq8m3a0y \
         --tx-fee 0.001 \
@@ -81,7 +84,7 @@ ${CKB_BIN} miner -C ${DEV_CHAIN_DIR} -l 4
 # 2. deploy validator
 ${CKB_BIN} miner -C ${DEV_CHAIN_DIR} -l 1
 VALIDATOR_TX_HASH_PATH=${INTEGRATION_ROOT}/tx_hash_validator
-ckb-cli --url ${API_URL} wallet transfer \
+ckb-cli wallet transfer \
         --privkey-path ${PRIVKEY_PATH} \
         --to-address ckt1qyqdfjzl8ju2vfwjtl4mttx6me09hayzfldq8m3a0y \
         --tx-fee 0.01 \
