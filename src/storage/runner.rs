@@ -9,7 +9,7 @@ use ckb_types::{
         BytesOpt, CellInput, CellOutput, OutPoint, Script, ScriptOpt, Transaction, WitnessArgs,
     },
     prelude::*,
-    H160, H256,
+    H160, H256, U256,
 };
 use ckb_vm::{
     registers::{A0, A1, A2, A3, A4, A7},
@@ -919,14 +919,20 @@ impl<Mac: SupportMachine> RunContext<Mac> for CsalRunContext {
                 machine.set_register(A0, Mac::REG::from_u8(0));
                 Ok(true)
             }
+            // evmc_tx_context {block_number, block_timestamp, difficulty, chain_id}
             3081 => {
                 let buffer_ptr = machine.registers()[A0].to_u64();
-                let mut data = [0u8; 16];
+                let mut data = [0u8; 8 + 8 + 32 + 32];
                 let number = self.tip_header.number();
                 let timestamp = self.tip_header.timestamp() / 1000;
+                let difficulty = self.tip_header.difficulty();
+                // TODO: config chain ID
+                let chain_id = U256::one();
                 log::debug!("number: {}, timestamp: {}", number, timestamp);
                 data[0..8].copy_from_slice(&number.to_le_bytes());
                 data[8..16].copy_from_slice(&timestamp.to_le_bytes());
+                data[16..48].copy_from_slice(&difficulty.to_be_bytes());
+                data[48..80].copy_from_slice(&chain_id.to_be_bytes());
                 machine.memory_mut().store_bytes(buffer_ptr, &data[..])?;
                 machine.set_register(A0, Mac::REG::from_u8(0));
                 Ok(true)

@@ -1,4 +1,5 @@
 #include <evmc/evmc.h>
+#include <intx/intx.hpp>
 
 #define CSAL_VALIDATOR_TYPE 1
 #include "validator.h"
@@ -43,6 +44,37 @@ int check_script_code(const uint8_t *script_data_a,
   }
   *matched = true;
   return 0;
+}
+
+evmc_uint256be compact_to_difficulty(uint32_t compact) {
+  uint32_t exponent = compact >> 24;
+  intx::uint256 mantissa = compact & 0x00ffffff;
+
+  intx::uint256 target = 0;
+  if (exponent <= 3) {
+    mantissa >>= 8 * (3 - exponent);
+    target = mantissa;
+  } else {
+    target = mantissa;
+    target <<= 8 * (exponent - 3);
+  }
+
+  bool overflow = !(mantissa == 0) && (exponent > 32);
+
+  intx::uint256 difficulty = 0;
+  if (target == 0 || overflow) {
+    difficulty = 0;
+  } else if (target == 1) {
+    difficulty = ~intx::uint256{0};
+  } else {
+    intx::uint512 hspace = 1;
+    hspace = hspace << 256;
+    intx::uint512 htarget = target;
+    difficulty = (hspace / htarget).lo;
+  }
+  evmc_uint256be ret;
+  intx::be::store(ret.bytes, difficulty);
+  return ret;
 }
 
 #define MAX_CONTRACT_COUNT 64
@@ -1008,6 +1040,8 @@ inline int verify_params(const uint8_t *signature_data,
       ckb_debug("First header too old");
       return -11;
     }
+    mol_seg_t compact_target_seg = MolReader_RawHeader_get_compact_target(&raw_seg);
+    uint32_t compact_target = *((uint32_t *)compact_target_seg.ptr);
 
     /* gas_price = 0 */
     memset(global_tx_context.tx_gas_price.bytes, 0, 20);
@@ -1016,10 +1050,16 @@ inline int verify_params(const uint8_t *signature_data,
     global_tx_context.block_timestamp = (int64_t)timestamp;
     /* int64_t::MAX */
     global_tx_context.block_gas_limit = 9223372036854775807;
-    /* TODO tx_gas_price */
+    /* gas_price = 0 */
+    global_tx_context.tx_gas_price = evmc_uint256be{};
     /* TODO block_coinbase */
-    /* TODO block_difficulty */
-    /* TODO chain_id */
+    /* convert from compact_target */
+    global_tx_context.block_difficulty = compact_to_difficulty(compact_target);
+    /* chain_id = 1 (mainnet) */
+    intx::uint256 chain_id = 1;
+    intx::be::store(global_tx_context.chain_id.bytes, chain_id);
+
+    debug_print_data("[block difficulty]", global_tx_context.block_difficulty.bytes, 32);
   }
 
   /* Verify sender by signature field */

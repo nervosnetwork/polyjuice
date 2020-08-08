@@ -76,12 +76,20 @@ struct evmc_tx_context get_tx_context(struct evmc_host_context* context) {
   uint64_t block_number = *(uint64_t *)ctx_ptr;
   ctx_ptr += 8;
   uint64_t block_timestamp = *(uint64_t *)ctx_ptr;
-  debug_print_int("[block number]", block_number);
-  debug_print_int("[block timestamp]", block_timestamp);
+  ctx_ptr += 8;
   ctx.block_number = (int64_t)block_number;
   ctx.block_timestamp = (int64_t)block_timestamp;
+  memcpy(ctx.block_difficulty.bytes, ctx_ptr, 32);
+  ctx_ptr += 32;
+  memcpy(ctx.chain_id.bytes, ctx_ptr, 32);
+  ctx_ptr += 32;
   /* int64_t::MAX */
   ctx.block_gas_limit = 9223372036854775807;
+
+  debug_print_int("[block number]", block_number);
+  debug_print_int("[block timestamp]", block_timestamp);
+  debug_print_data("[block difficulty]", ctx.block_difficulty.bytes, 32);
+  debug_print_data("[chain id]", ctx.chain_id.bytes, 32);
   return ctx;
 }
 

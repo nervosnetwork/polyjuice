@@ -39,6 +39,7 @@ fi
 rm -rf data specs *.toml
 ./ckb init --chain dev --ba-arg 0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7
 sed -i "s/.*value =.*/value = 200/" ./ckb-miner.toml
+sed -i "s/\"info\"/\"info,ckb-script=debug\"/g" ckb.toml
 sed -i "s/8114/9114/g" *.toml
 sed -i "s/8115/9115/g" *.toml
 ./ckb run >ckb.log 2>&1 &
