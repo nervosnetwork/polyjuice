@@ -57,7 +57,7 @@ impl Runner {
             false,
         );
 
-        let tip_header = self.loader.load_tip_header()?;
+        let tip_header = self.loader.load_header(None)?;
         let mut context =
             CsalRunContext::new(self.loader.clone(), self.run_config.clone(), tip_header);
         if let Err(err) = context.run(program) {
@@ -87,7 +87,7 @@ impl Runner {
             false,
         );
 
-        let tip_header = self.loader.load_tip_header()?;
+        let tip_header = self.loader.load_header(None)?;
         let mut context =
             CsalRunContext::new(self.loader.clone(), self.run_config.clone(), tip_header);
         if let Err(err) = context.run(program) {
@@ -103,7 +103,7 @@ impl Runner {
         code: Bytes,
     ) -> Result<CsalRunContext, Box<dyn StdError>> {
         let program = Program::new_create(EoaAddress(sender.clone()), sender, code);
-        let tip_header = self.loader.load_tip_header()?;
+        let tip_header = self.loader.load_header(None)?;
         let mut context =
             CsalRunContext::new(self.loader.clone(), self.run_config.clone(), tip_header);
         if let Err(err) = context.run(program) {
@@ -308,6 +308,8 @@ pub struct CsalRunContext {
     pub loader: Loader,
     pub run_config: RunConfig,
     pub tip_header: HeaderView,
+    // Save header deps for get_block_hash
+    pub header_deps: HashSet<H256>,
     // The transaction origin address
     pub tx_origin: EoaAddress,
     // First fuel input cell
@@ -328,6 +330,7 @@ impl CsalRunContext {
             loader,
             run_config,
             tip_header,
+            header_deps: HashSet::default(),
             tx_origin: Default::default(),
             first_fuel_input: None,
             first_contract_input: None,
@@ -474,6 +477,7 @@ impl CsalRunContext {
             .loader
             .load_header_deps(&inputs)?
             .into_iter()
+            .chain(self.header_deps.clone())
             .filter(|hash| hash != &tip_header_hash)
             .collect::<HashSet<_>>()
             .into_iter()
@@ -919,8 +923,25 @@ impl<Mac: SupportMachine> RunContext<Mac> for CsalRunContext {
                 machine.set_register(A0, Mac::REG::from_u8(0));
                 Ok(true)
             }
-            // evmc_tx_context {block_number, block_timestamp, difficulty, chain_id}
+            // get block hash by number
+            // TODO: block number must less than max(block_number(inputs))?
             3081 => {
+                let block_hash_ptr = machine.registers()[A0].to_u64();
+                let number = machine.registers()[A1].to_u64();
+                let header_view = self.loader.load_header(Some(number)).map_err(|err| {
+                    log::warn!("get_block_hash({}), load header failed: {}", number, err);
+                    VMError::IO(std::io::ErrorKind::InvalidInput)
+                })?;
+                let block_hash: H256 = header_view.hash().unpack();
+                machine
+                    .memory_mut()
+                    .store_bytes(block_hash_ptr, block_hash.as_bytes())?;
+                machine.set_register(A0, Mac::REG::from_u8(0));
+                self.header_deps.insert(block_hash);
+                Ok(true)
+            }
+            // evmc_tx_context {block_number, block_timestamp, difficulty, chain_id}
+            3082 => {
                 let buffer_ptr = machine.registers()[A0].to_u64();
                 let mut data = [0u8; 8 + 8 + 32 + 32];
                 let number = self.tip_header.number();

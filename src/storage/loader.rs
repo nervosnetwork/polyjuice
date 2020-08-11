@@ -370,8 +370,15 @@ impl Loader {
             .collect()
     }
 
-    pub fn load_tip_header(&mut self) -> Result<HeaderView, String> {
-        self.client.get_tip_header().map(HeaderView::from)
+    pub fn load_header(&mut self, number_opt: Option<u64>) -> Result<HeaderView, String> {
+        let header = if let Some(number) = number_opt {
+            self.client
+                .get_header_by_number(number)?
+                .ok_or_else(|| format!("Block #{} not exists", number))?
+        } else {
+            self.client.get_tip_header()?
+        };
+        Ok(HeaderView::from(header))
     }
 }
 

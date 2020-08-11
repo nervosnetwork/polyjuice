@@ -154,6 +154,11 @@ struct evmc_result call(struct evmc_host_context* context,
   return res;
 }
 
+evmc_bytes32 get_block_hash(struct evmc_host_context* context, int64_t number) {
+  evmc_bytes32 block_hash{};
+  return block_hash;
+}
+
 void emit_log(struct evmc_host_context* context,
               const evmc_address* address,
               const uint8_t* data,

@@ -78,6 +78,7 @@ evmc_uint256be compact_to_difficulty(uint32_t compact) {
 }
 
 #define MAX_CONTRACT_COUNT 64
+#define MAX_HEADER_COUNT 128
 #define HEADER_SIZE 4096
 
 typedef struct {
@@ -127,12 +128,21 @@ typedef struct {
   size_t program_index;
 } contract_info;
 
+typedef struct {
+  /* block number */
+  uint64_t number;
+  /* block hash */
+  evmc_bytes32 hash;
+} header_info;
+
 static bool global_touched = false;
 static contract_info global_info_list[MAX_CONTRACT_COUNT];
 static size_t global_info_count = 0;
 static evmc_address global_current_contract;
 static bool global_current_is_main = false;
 static struct evmc_tx_context global_tx_context;
+static header_info global_header_infos[MAX_HEADER_COUNT];
+static size_t global_header_count = 0;
 
 int call_record_load(call_record *record, const uint8_t *buf, const size_t buf_size) {
   if (buf_size < 24) {
@@ -692,6 +702,17 @@ struct evmc_result call(struct evmc_host_context* context,
   return res;
 }
 
+evmc_bytes32 get_block_hash(struct evmc_host_context* context, int64_t number) {
+  uint64_t block_number = (uint64_t) number;
+  for (size_t i = 0; i < global_header_count; i++) {
+    if (global_header_infos[i].number == block_number) {
+      return global_header_infos[i].hash;
+    }
+  }
+  evmc_bytes32 zero_block_hash{};
+  return zero_block_hash;
+}
+
 void emit_log(struct evmc_host_context* context,
               const evmc_address* address,
               const uint8_t* data,
@@ -995,7 +1016,7 @@ inline int verify_params(const uint8_t *signature_data,
       len = HEADER_SIZE;
       ret = ckb_load_header(header_buffer, &len, 0, input_index, CKB_SOURCE_INPUT);
       if (ret == CKB_INDEX_OUT_OF_BOUND) {
-        ckb_debug("load headers finised");
+        ckb_debug("load input headers finised");
         break;
       } else if (ret != CKB_SUCCESS) {
         return ret;
@@ -1015,6 +1036,37 @@ inline int verify_params(const uint8_t *signature_data,
       }
       input_index += 1;
     }
+
+    uint64_t header_index = 0;
+    while(1) {
+      len = HEADER_SIZE;
+      ret = ckb_load_header(header_buffer, &len, 0, header_index, CKB_SOURCE_HEADER_DEP);
+      if (ret == CKB_INDEX_OUT_OF_BOUND) {
+        ckb_debug("load all headers finised");
+        break;
+      } else if (ret != CKB_SUCCESS) {
+        return ret;
+      }
+      if (len > HEADER_SIZE) {
+        /* buffer not enough */
+        return -10;
+      }
+      mol_seg_t header_seg;
+      header_seg.ptr = (uint8_t *)header_buffer;
+      header_seg.size = len;
+      mol_seg_t raw_seg = MolReader_Header_get_raw(&header_seg);
+      mol_seg_t block_number_seg = MolReader_RawHeader_get_number(&raw_seg);
+      uint64_t block_number = *((uint64_t *)block_number_seg.ptr);
+
+      evmc_bytes32 block_hash{};
+      blake2b_init(&blake2b_ctx, 32);
+      blake2b_update(&blake2b_ctx, header_seg.ptr, header_seg.size);
+      blake2b_final(&blake2b_ctx, block_hash.bytes, 32);
+      global_header_infos[header_index] = header_info{block_number, block_hash};
+
+      header_index += 1;
+    }
+    global_header_count = header_index;
 
     len = HEADER_SIZE;
     ret = ckb_load_header(header_buffer, &len, 0, 0, CKB_SOURCE_HEADER_DEP);

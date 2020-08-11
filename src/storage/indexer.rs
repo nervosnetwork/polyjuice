@@ -388,9 +388,19 @@ impl Indexer {
                         .get_header(tip_block_hash.clone())?
                         .map(core::HeaderView::from)
                         .expect("block not exists");
+                    let mut header_deps = HashMap::default();
+                    for block_hash in tx.header_deps {
+                        let header_view = self
+                            .client
+                            .get_header(block_hash.clone())?
+                            .map(core::HeaderView::from)
+                            .expect("header deps block not exists");
+                        header_deps.insert(header_view.number(), header_view);
+                    }
                     if let Some(mut extractor) = ContractExtractor::init(
                         self.run_config.clone(),
                         tip_header,
+                        header_deps,
                         tx_hash,
                         tx_index as u32,
                         tx.witnesses,
@@ -525,6 +535,7 @@ impl Indexer {
 pub struct ContractExtractor {
     run_config: RunConfig,
     tip_header: core::HeaderView,
+    header_deps: HashMap<u64, core::HeaderView>,
     tx_hash: H256,
     tx_index: u32,
     entrance_contract: ContractAddress,
@@ -640,6 +651,7 @@ impl ContractExtractor {
     pub fn init(
         run_config: RunConfig,
         tip_header: core::HeaderView,
+        header_deps: HashMap<u64, core::HeaderView>,
         tx_hash: H256,
         tx_index: u32,
         witnesses: Vec<JsonBytes>,
@@ -697,6 +709,7 @@ impl ContractExtractor {
             ContractExtractor {
                 run_config,
                 tip_header,
+                header_deps,
                 tx_hash,
                 tx_index,
                 entrance_contract,
@@ -921,8 +934,22 @@ impl<Mac: SupportMachine> RunContext<Mac> for ContractExtractor {
                 machine.set_register(A0, Mac::REG::from_u8(0));
                 Ok(true)
             }
-            // evmc_tx_context {block_number, block_timestamp, difficulty, chain_id}
             3081 => {
+                let block_hash_ptr = machine.registers()[A0].to_u64();
+                let number = machine.registers()[A1].to_u64();
+                let header_view = self.header_deps.get(&number).ok_or_else(|| {
+                    log::warn!("get_block_hash({}), load header failed", number);
+                    VMError::IO(std::io::ErrorKind::InvalidInput)
+                })?;
+                let block_hash: H256 = header_view.hash().unpack();
+                machine
+                    .memory_mut()
+                    .store_bytes(block_hash_ptr, block_hash.as_bytes())?;
+                machine.set_register(A0, Mac::REG::from_u8(0));
+                Ok(true)
+            }
+            // evmc_tx_context {block_number, block_timestamp, difficulty, chain_id}
+            3082 => {
                 let buffer_ptr = machine.registers()[A0].to_u64();
                 let mut data = [0u8; 8 + 8 + 32 + 32];
                 let number = self.tip_header.number();

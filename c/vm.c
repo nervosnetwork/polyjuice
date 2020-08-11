@@ -85,7 +85,7 @@ int execute_vm(const uint8_t *source,
   }
 
   struct evmc_vm *vm = evmc_create_evmone();
-  struct evmc_host_interface interface = { account_exists, get_storage, set_storage, get_balance, get_code_size, get_code_hash, copy_code, selfdestruct, call, get_tx_context, NULL, emit_log};
+  struct evmc_host_interface interface = { account_exists, get_storage, set_storage, get_balance, get_code_size, get_code_hash, copy_code, selfdestruct, call, get_tx_context, get_block_hash, emit_log};
   struct evmc_host_context context;
   context_init(&context, vm, &interface, tx_origin, existing_values, changes);
 

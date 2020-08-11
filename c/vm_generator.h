@@ -9,7 +9,8 @@
 #define _CSAL_CALL_SYSCALL_NUMBER 3078
 #define _CSAL_GET_CODE_SIZE_SYSCALL_NUMBER 3079
 #define _CSAL_COPY_CODE_SYSCALL_NUMBER 3080
-#define _CSAL_GET_TX_CONTEXT 3081
+#define _CSAL_GET_BLOCK_HASH 3081
+#define _CSAL_GET_TX_CONTEXT 3082
 
 static char debug_buffer[64 * 1024];
 static void debug_print_data(const char *prefix,
@@ -45,6 +46,9 @@ int csal_get_code_size(uint8_t *address, uint32_t *code_size) {
 }
 int csal_copy_code(uint8_t *address, uint32_t code_offset, uint8_t *buffer_data, uint32_t buffer_size, uint32_t *done_size) {
   return syscall(_CSAL_COPY_CODE_SYSCALL_NUMBER, address, code_offset, buffer_data, buffer_size, done_size, 0);
+}
+int csal_get_block_hash(evmc_bytes32* block_hash, int64_t number) {
+  return syscall(_CSAL_GET_BLOCK_HASH, block_hash, number, 0, 0, 0, 0);
 }
 int csal_get_tx_context(uint8_t *buffer) {
   return syscall(_CSAL_GET_TX_CONTEXT, buffer, 0, 0, 0, 0, 0);
@@ -225,6 +229,15 @@ struct evmc_result call(struct evmc_host_context* context,
   struct evmc_result res = { EVMC_SUCCESS, msg->gas, output_data, output_size, release_result, create_address };
   memset(res.padding, 0, 4);
   return res;
+}
+
+evmc_bytes32 get_block_hash(struct evmc_host_context* context, int64_t number) {
+  evmc_bytes32 block_hash{};
+  int ret = csal_get_block_hash(&block_hash, number);
+  if (ret != CKB_SUCCESS) {
+    ckb_debug("get_block_hash failed");
+  }
+  return block_hash;
 }
 
 void emit_log(struct evmc_host_context* context,
