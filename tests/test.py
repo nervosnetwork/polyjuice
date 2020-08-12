@@ -43,6 +43,7 @@ CREATE_CONTRACT = "CreateContract"
 CALL_CONTRACT = "CallContract"
 CALL_MULTI = "CallMultipleTimes"
 CALL_SELFDESTRUCT = "CallSelfDestruct"
+BLOCK_INFO = "BlockInfo"
 
 contracts_binary = {
     SIMPLE_STORAGE: open(os.path.join(evm_contracts_dir, 'SimpleStorage.bin'), 'r').read().strip(),
@@ -54,7 +55,12 @@ contracts_binary = {
     CALL_CONTRACT: open(os.path.join(evm_contracts_dir, 'CallContract.bin'), 'r').read().strip(),
     CALL_MULTI: open(os.path.join(evm_contracts_dir, 'CallMultipleTimes.bin'), 'r').read().strip(),
     CALL_SELFDESTRUCT: open(os.path.join(evm_contracts_dir, 'CallSelfDestruct.bin'), 'r').read().strip(),
+    BLOCK_INFO: open(os.path.join(evm_contracts_dir, 'BlockInfo.bin'), 'r').read().strip(),
 }
+
+def to_uint(number):
+    output = hex(number)[2:]
+    return '0' * (64 - len(output)) + output
 
 def send_jsonrpc(method, params):
     payload = {
@@ -295,6 +301,34 @@ def test_call_selfdestruct():
     assert(target_output["type"] is None, "beneficiary type script not null")
     print("[Finish]: {}\n".format(contract_name))
 
+def test_get_block_info():
+    contract_name = BLOCK_INFO
+    print("[Start]: {}\n".format(contract_name))
+    contract_address = create_contract_by_name(contract_name)
+
+    functions = {
+        'getDifficulty': '0xb6baffe3',
+        'getNumber': '0xf2c9ecd8',
+        'getTimestamp': '0x188ec356',
+    }
+
+    result = call_contract(contract_address, functions['getDifficulty'], is_static=True)
+    print('getDifficulty() => {}'.format(result['return_data']))
+    assert(result['return_data'] == '0x0000000000000000000000000000000000000000000000000000000000000100')
+
+    result = call_contract(contract_address, functions['getNumber'], is_static=True)
+    print('getNumber() => {}'.format(result['return_data']))
+    assert(result['return_data'] > '0x0000000000000000000000000000000000000000000000000000000000000001')
+    assert(result['return_data'] < '0x0000000000000000000000000000000000000000000000000000000000000100')
+
+    result = call_contract(contract_address, functions['getTimestamp'], is_static=True)
+    print('getTimestamp() => {}'.format(result['return_data']))
+    assert(result['return_data'] > '0x000000000000000000000000000000000000000000000000000000005f2b964a')
+    # 2120.9.30
+    assert(result['return_data'] < '0x000000000000000000000000000000000000000000000000000000011b8b1c00')
+
+    print("[Finish]: {}\n".format(contract_name))
+
 def main():
     test_simple_storage()
     test_log_events()
@@ -305,6 +339,7 @@ def main():
     test_contract_call_contract()
     test_call_multiple_times()
     test_call_selfdestruct()
+    test_get_block_info()
 
 if __name__ == "__main__":
     main()
