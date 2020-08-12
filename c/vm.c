@@ -54,7 +54,7 @@ int execute_vm(const uint8_t *source,
   uint32_t input_size;
   uint8_t *input_data;
   /* FIXME: handle is_inner_call */
-  if (code_size > 0) {
+  if (code_size > 0 || call_kind == EVMC_DELEGATECALL) {
     code_data = (uint8_t *)(source + (CODE_OFFSET + 4));
     input_size = *(uint32_t *)(code_data + code_size);
     input_data = input_size > 0 ? code_data + (code_size + 4) : NULL;

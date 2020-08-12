@@ -847,7 +847,10 @@ impl<Mac: SupportMachine> RunContext<Mac> for ContractExtractor {
 
                 let kind = CallKind::try_from(kind_value).unwrap();
 
-                if kind != CallKind::CREATE && kind != CallKind::CALL {
+                if kind != CallKind::CREATE
+                    && kind != CallKind::CALL
+                    && kind != CallKind::DELEGATECALL
+                {
                     panic!("Unsupported call: {:?}", kind);
                 }
 

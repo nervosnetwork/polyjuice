@@ -175,7 +175,7 @@ impl ExecuteRecord {
     pub fn witness_data(&self, first_program: bool) -> WitnessData {
         // This optmize is for reducing witness size by remove duplicated code field
         let mut program = self.program.clone();
-        if !first_program {
+        if !first_program && self.program.kind != CallKind::DELEGATECALL {
             program.code = Bytes::default();
         }
         for (dest, program_index) in &self.calls {
@@ -531,13 +531,19 @@ impl CsalRunContext {
             self.set_entrance_program(program.clone())?;
         }
 
+        let info_address = match program.kind {
+            CallKind::CALL | CallKind::CREATE => program.destination.clone(),
+            CallKind::DELEGATECALL => ContractAddress(program.sender.clone()),
+            _ => panic!("unsupported call kind: {:?}", program.kind),
+        };
+
         if program.is_create() {
             self.state_changed = true;
         }
         let (contract_input_opt, tree) = if program.is_create() {
             (None, SparseMerkleTree::default())
         } else {
-            self.get_contract_info(&program.destination)
+            self.get_contract_info(&info_address)
                 .map::<Result<_, String>, _>(|info| {
                     let input_opt: Option<ContractInput> = info.input.clone();
                     let tree = SparseMerkleTree::new(*info.tree.root(), info.tree.store().clone());
@@ -545,7 +551,7 @@ impl CsalRunContext {
                 })
                 .unwrap_or_else(|| {
                     let change = self.loader.load_latest_contract_change(
-                        program.destination.clone(),
+                        info_address.clone(),
                         None,
                         false,
                         false,
@@ -564,15 +570,15 @@ impl CsalRunContext {
             program.destination = destination.clone();
         }
 
-        if let Some(contract_index) = self.get_contract_index(&destination) {
+        if let Some(contract_index) = self.get_contract_index(&info_address) {
             self.contract_index = contract_index;
             let info = &mut self.contracts[contract_index].1;
             info.add_record(program.clone());
         } else {
             self.contract_index = self.contracts.len();
-            let mut info = ContractInfo::new(destination.clone(), contract_input_opt, tree);
+            let mut info = ContractInfo::new(info_address.clone(), contract_input_opt, tree);
             info.add_record(program.clone());
-            self.contracts.push((destination, info));
+            self.contracts.push((info_address, info));
         }
 
         let program_data = WitnessData::new(program).program_data();
@@ -798,7 +804,6 @@ impl<Mac: SupportMachine> RunContext<Mac> for CsalRunContext {
             }
             // CALL
             3078 => {
-                // FIXME:
                 let mut msg_data_address = machine.registers()[A1].to_u64();
                 let kind_value: u8 = vm_load_u8(machine, msg_data_address)?;
                 msg_data_address += 1;
@@ -817,19 +822,30 @@ impl<Mac: SupportMachine> RunContext<Mac> for CsalRunContext {
                 let input_data: Vec<u8> = vm_load_data(machine, msg_data_address, input_size)?;
                 msg_data_address += input_size as u64;
                 let _value: H256 = vm_load_h256(machine, msg_data_address)?;
+                msg_data_address += 32;
+                let _create2_salt = vm_load_h256(machine, msg_data_address)?;
 
                 let destination = ContractAddress(destination);
                 let kind = CallKind::try_from(kind_value).unwrap();
                 log::debug!("kind: {:?}, flags: {}, depth: {}, destination: {:x}, sender: {:x}, input_data: {}",
                             kind, flags, depth, destination.0, sender, hex::encode(&input_data));
-                let (code, input) = if kind == CallKind::CREATE {
-                    (Bytes::from(input_data), Bytes::default())
-                } else {
-                    let code = self.get_contract_code(&destination).map_err(|_err| {
-                        log::warn!("load contract code failed: {:x}", destination.0);
-                        VMError::IO(std::io::ErrorKind::InvalidInput)
-                    })?;
-                    (code, Bytes::from(input_data))
+
+                let (code, input) = match kind {
+                    CallKind::CALLCODE => {
+                        log::warn!("Invalid call kind: {:?}", kind);
+                        return Err(VMError::IO(std::io::ErrorKind::InvalidInput));
+                    }
+                    CallKind::CREATE => (Bytes::from(input_data), Bytes::default()),
+                    CallKind::CALL | CallKind::DELEGATECALL => {
+                        let code = self.get_contract_code(&destination).map_err(|_err| {
+                            log::warn!("load contract code failed: {:x}", destination.0);
+                            VMError::IO(std::io::ErrorKind::InvalidInput)
+                        })?;
+                        (code, Bytes::from(input_data))
+                    }
+                    CallKind::CREATE2 => {
+                        unimplemented!();
+                    }
                 };
                 let program = Program {
                     kind,
