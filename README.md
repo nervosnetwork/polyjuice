@@ -16,7 +16,6 @@ Polyjuice use [evmone](https://github.com/ethereum/evmone) as the EVM implementa
 
 * `CREATE2` (will be supported)
 * `DELEGATECALL` (will be supported)
-* `BLOCKHASH` (will be supported soon)
 * `COINBASE`  (will be supported)
 
 # A short tutorial
