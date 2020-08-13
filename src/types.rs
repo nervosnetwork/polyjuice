@@ -270,6 +270,15 @@ impl Default for CallKind {
     }
 }
 
+impl CallKind {
+    pub fn is_create(&self) -> bool {
+        *self == CallKind::CREATE || *self == CallKind::CREATE2
+    }
+    pub fn is_call(&self) -> bool {
+        !self.is_create()
+    }
+}
+
 impl Program {
     pub fn new_create(tx_origin: EoaAddress, sender: H160, code: Bytes) -> Program {
         Program {
@@ -306,7 +315,7 @@ impl Program {
     }
 
     pub fn is_create(&self) -> bool {
-        self.kind == CallKind::CREATE
+        self.kind.is_create()
     }
 
     pub fn serialize(&self) -> Bytes {

@@ -46,6 +46,7 @@ int check_script_code(const uint8_t *script_data_a,
   return 0;
 }
 
+
 evmc_uint256be compact_to_difficulty(uint32_t compact) {
   uint32_t exponent = compact >> 24;
   intx::uint256 mantissa = compact & 0x00ffffff;
@@ -344,7 +345,7 @@ int contract_info_next_program(contract_info *info) {
   }
 
   contract_program *program = info->current_program;
-  if (program->kind == EVMC_CREATE) {
+  if (is_create(program->kind)) {
     /* Used in: get_code_size,copy_code */
     info->code_size = program->return_data_size;
     info->code_data = program->return_data;
@@ -494,7 +495,7 @@ int contract_info_call(const contract_info *sender_info,
     return -99;
   }
 
-  if (dest_program->kind == EVMC_CREATE) {
+  if (is_create(dest_program->kind)) {
     if (dest_info->program_index != 0) {
       ckb_debug("CREATE must be first program");
       return -99;
@@ -655,7 +656,7 @@ struct evmc_result call(struct evmc_host_context* context,
   }
 
   evmc_address destination{};
-  if (msg->kind == EVMC_CREATE) {
+  if (is_create(msg->kind)) {
     /* TODO: security check */
     contract_program *program = sender_info->current_program;
     call_record call = program->calls[program->call_index];
@@ -969,7 +970,7 @@ inline int verify_params(const uint8_t *signature_data,
      * - verify code_hash not changed
      * - verify code_hash in data filed match the blake2b_h256(code_data)
      */
-    if (call_kind != EVMC_CREATE) {
+    if (!is_create(call_kind)) {
       uint8_t code_hash[32];
       blake2b_init(&blake2b_ctx, 32);
       blake2b_update(&blake2b_ctx, code_data, code_size);
@@ -1240,7 +1241,7 @@ inline int verify_result(struct evmc_host_context* context,
                          const size_t return_data_size,
                          const evmc_address *beneficiary) {
   int ret;
-  if (msg->kind == EVMC_CREATE) {
+  if (is_create(msg->kind)) {
     /*
      * verify code_hash in output data filed match the blake2b_h256(res.output_data)
      */

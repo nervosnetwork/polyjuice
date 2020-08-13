@@ -847,13 +847,6 @@ impl<Mac: SupportMachine> RunContext<Mac> for ContractExtractor {
 
                 let kind = CallKind::try_from(kind_value).unwrap();
 
-                if kind != CallKind::CREATE
-                    && kind != CallKind::CALL
-                    && kind != CallKind::DELEGATECALL
-                {
-                    panic!("Unsupported call: {:?}", kind);
-                }
-
                 let info_mut = self
                     .script_groups
                     .get_mut(&self.current_contract)
@@ -862,7 +855,7 @@ impl<Mac: SupportMachine> RunContext<Mac> for ContractExtractor {
                     .0
                     .clone();
                 info_mut.call_index += 1;
-                if kind == CallKind::CALL {
+                if kind.is_call() {
                     assert_eq!(
                         destination.0, msg_destination,
                         "destination address not match"
@@ -872,7 +865,7 @@ impl<Mac: SupportMachine> RunContext<Mac> for ContractExtractor {
                 let return_data = self
                     .run_with(&destination)
                     .map_err(|_err| VMError::Unexpected)?;
-                let create_address = if kind == CallKind::CREATE {
+                let create_address = if kind.is_create() {
                     destination
                 } else {
                     ContractAddress(H160::default())

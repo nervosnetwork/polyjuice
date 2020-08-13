@@ -175,7 +175,10 @@ impl ExecuteRecord {
     pub fn witness_data(&self, first_program: bool) -> WitnessData {
         // This optmize is for reducing witness size by remove duplicated code field
         let mut program = self.program.clone();
-        if !first_program && self.program.kind != CallKind::DELEGATECALL {
+        if !first_program
+            && self.program.kind != CallKind::CALLCODE
+            && self.program.kind != CallKind::DELEGATECALL
+        {
             program.code = Bytes::default();
         }
         for (dest, program_index) in &self.calls {
@@ -314,7 +317,7 @@ pub struct CsalRunContext {
     pub tx_origin: EoaAddress,
     // First fuel input cell
     pub first_fuel_input: Option<(CellInput, u64)>,
-    // First contract input cell (when kind == CallKind::CALL)
+    // First contract input cell (when kind == CallKind::CALL || kind == DELEGATECALL)
     pub first_contract_input: Option<ContractInput>,
     // The entrance program
     pub entrance_program: Option<Program>,
@@ -531,10 +534,9 @@ impl CsalRunContext {
             self.set_entrance_program(program.clone())?;
         }
 
-        let info_address = match program.kind {
-            CallKind::CALL | CallKind::CREATE => program.destination.clone(),
-            CallKind::DELEGATECALL => ContractAddress(program.sender.clone()),
-            _ => panic!("unsupported call kind: {:?}", program.kind),
+        let mut info_address = match program.kind {
+            CallKind::CALL | CallKind::CREATE | CallKind::CREATE2 => program.destination.clone(),
+            CallKind::CALLCODE | CallKind::DELEGATECALL => self.current_contract_address().clone(),
         };
 
         if program.is_create() {
@@ -567,6 +569,7 @@ impl CsalRunContext {
         // FIXME: The output_index is wrong
         let destination = self.destination(&program, self.contracts.len() as u64);
         if program.is_create() {
+            info_address = destination.clone();
             program.destination = destination.clone();
         }
 
@@ -830,21 +833,25 @@ impl<Mac: SupportMachine> RunContext<Mac> for CsalRunContext {
                 log::debug!("kind: {:?}, flags: {}, depth: {}, destination: {:x}, sender: {:x}, input_data: {}",
                             kind, flags, depth, destination.0, sender, hex::encode(&input_data));
 
+                if kind == CallKind::DELEGATECALL && sender != self.tx_origin.0 {
+                    log::error!(
+                        "Invalid DELEGATECALL: sender={:x}, tx_origin={:x}",
+                        sender,
+                        self.tx_origin.0
+                    );
+                    return Err(VMError::Unexpected);
+                }
+
                 let (code, input) = match kind {
-                    CallKind::CALLCODE => {
-                        log::warn!("Invalid call kind: {:?}", kind);
-                        return Err(VMError::IO(std::io::ErrorKind::InvalidInput));
+                    CallKind::CREATE | CallKind::CREATE2 => {
+                        (Bytes::from(input_data), Bytes::default())
                     }
-                    CallKind::CREATE => (Bytes::from(input_data), Bytes::default()),
-                    CallKind::CALL | CallKind::DELEGATECALL => {
+                    CallKind::CALL | CallKind::DELEGATECALL | CallKind::CALLCODE => {
                         let code = self.get_contract_code(&destination).map_err(|_err| {
                             log::warn!("load contract code failed: {:x}", destination.0);
                             VMError::IO(std::io::ErrorKind::InvalidInput)
                         })?;
                         (code, Bytes::from(input_data))
-                    }
-                    CallKind::CREATE2 => {
-                        unimplemented!();
                     }
                 };
                 let program = Program {
@@ -873,7 +880,7 @@ impl<Mac: SupportMachine> RunContext<Mac> for CsalRunContext {
                     .current_record_mut()
                     .calls
                     .push((destination.clone(), dest_program_index));
-                let create_address = if kind == CallKind::CREATE {
+                let create_address = if kind.is_create() {
                     destination
                 } else {
                     ContractAddress(H160::default())

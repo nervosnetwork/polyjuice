@@ -23,6 +23,8 @@
 #define DESTINATION_OFFSET (SENDER_OFFSET + ADDRESS_LEN)
 #define CODE_OFFSET (DESTINATION_OFFSET + ADDRESS_LEN)
 
+#define is_create(kind) ((kind) == EVMC_CREATE || (kind) == EVMC_CREATE2)
+
 #ifdef TEST_BIN
 #include "vm_test.h"
 #elif defined(BUILD_GENERATOR)
@@ -54,7 +56,7 @@ int execute_vm(const uint8_t *source,
   uint32_t input_size;
   uint8_t *input_data;
   /* FIXME: handle is_inner_call */
-  if (code_size > 0 || call_kind == EVMC_DELEGATECALL) {
+  if (code_size > 0 || call_kind == EVMC_CALLCODE || call_kind == EVMC_DELEGATECALL) {
     code_data = (uint8_t *)(source + (CODE_OFFSET + 4));
     input_size = *(uint32_t *)(code_data + code_size);
     input_data = input_size > 0 ? code_data + (code_size + 4) : NULL;
@@ -112,7 +114,7 @@ int execute_vm(const uint8_t *source,
     return ret;
   }
 
-  if (msg.kind == EVMC_CREATE) {
+  if (is_create(msg.kind)) {
     global_code_size = res.output_size;
     global_code_data = (uint8_t *)res.output_data;
   }

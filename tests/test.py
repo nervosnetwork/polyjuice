@@ -237,7 +237,7 @@ def test_contract_create_contract():
     ss_address = result["created_addresses"][1]
     static_call_args = "0x6d4ce63c"
     result = call_contract(ss_address, static_call_args, is_static=True)
-    assert(result["return_data"] == "0x00000000000000000000000000000000000000000000000000000000000000ff")
+    assert result["return_data"] == "0x00000000000000000000000000000000000000000000000000000000000000ff"
     print("[Finish]: {}\n".format(contract_name))
 
 
@@ -248,7 +248,7 @@ def test_contract_call_contract():
     print("create SimpleStorage contract({}) for {}".format(ss_address, contract_name))
 
     args = "000000000000000000000000{}".format(ss_address[2:])
-    assert(len(args) == 64)
+    assert len(args) == 64
     contract_address = create_contract_by_name(contract_name, constructor_args=args)
 
     # ethabi => proxySet(222)
@@ -278,9 +278,9 @@ def test_call_multiple_times():
 
     static_call_args = "0x6d4ce63c"
     result = call_contract(ss1_address, static_call_args, is_static=True)
-    assert(result["return_data"] == "0x0000000000000000000000000000000000000000000000000000000000000016")
+    assert result["return_data"] == "0x0000000000000000000000000000000000000000000000000000000000000016"
     result = call_contract(ss2_address, static_call_args, is_static=True)
-    assert(result["return_data"] == "0x0000000000000000000000000000000000000000000000000000000000000019")
+    assert result["return_data"] == "0x0000000000000000000000000000000000000000000000000000000000000019"
 
     print("[Finish]: {}\n".format(contract_name))
 
@@ -297,8 +297,8 @@ def test_call_selfdestruct():
     action_name = "call-{}-{}-{}".format(contract_name, contract_address, call_args)
     commit_tx(result, action_name[:42])
     target_output = result["tx"]["outputs"][1]
-    assert(target_output["lock"]["args"] == "0xb2e61ff569acf041b3c2c17724e2379c581eeac3", "beneficiary address not match")
-    assert(target_output["type"] is None, "beneficiary type script not null")
+    assert target_output["lock"]["args"] == "0xb2e61ff569acf041b3c2c17724e2379c581eeac3", "beneficiary address not match"
+    assert target_output["type"] is None, "beneficiary type script not null"
     print("[Finish]: {}\n".format(contract_name))
 
 def test_get_block_info():
@@ -314,18 +314,18 @@ def test_get_block_info():
 
     result = call_contract(contract_address, functions['getDifficulty'], is_static=True)
     print('getDifficulty() => {}'.format(result['return_data']))
-    assert(result['return_data'] == '0x0000000000000000000000000000000000000000000000000000000000000100')
+    assert result['return_data'] == '0x0000000000000000000000000000000000000000000000000000000000000100'
 
     result = call_contract(contract_address, functions['getNumber'], is_static=True)
     print('getNumber() => {}'.format(result['return_data']))
-    assert(result['return_data'] > '0x0000000000000000000000000000000000000000000000000000000000000001')
-    assert(result['return_data'] < '0x0000000000000000000000000000000000000000000000000000000000000100')
+    assert result['return_data'] > '0x0000000000000000000000000000000000000000000000000000000000000001'
+    assert result['return_data'] < '0x0000000000000000000000000000000000000000000000000000000000000100'
 
     result = call_contract(contract_address, functions['getTimestamp'], is_static=True)
     print('getTimestamp() => {}'.format(result['return_data']))
-    assert(result['return_data'] > '0x000000000000000000000000000000000000000000000000000000005f2b964a')
+    assert result['return_data'] > '0x000000000000000000000000000000000000000000000000000000005f2b964a'
     # 2120.9.30
-    assert(result['return_data'] < '0x000000000000000000000000000000000000000000000000000000011b8b1c00')
+    assert result['return_data'] < '0x000000000000000000000000000000000000000000000000000000011b8b1c00'
 
     print("[Finish]: {}\n".format(contract_name))
 
