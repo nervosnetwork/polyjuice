@@ -24,6 +24,7 @@
 #define CODE_OFFSET (DESTINATION_OFFSET + ADDRESS_LEN)
 
 #define is_create(kind) ((kind) == EVMC_CREATE || (kind) == EVMC_CREATE2)
+#define is_special_call(kind) ((kind) == EVMC_CALLCODE || (kind) == EVMC_DELEGATECALL)
 
 #ifdef TEST_BIN
 #include "vm_test.h"
@@ -51,12 +52,12 @@ int execute_vm(const uint8_t *source,
   const evmc_address tx_origin = *(evmc_address *)(source + TX_ORIGIN_OFFSET);
   const evmc_address sender = *(evmc_address *)(source + SENDER_OFFSET);
   const evmc_address destination = *(evmc_address *)(source + DESTINATION_OFFSET);
+
   uint32_t code_size = *(uint32_t *)(source + CODE_OFFSET);
   uint8_t *code_data;
   uint32_t input_size;
   uint8_t *input_data;
-  /* FIXME: handle is_inner_call */
-  if (code_size > 0 || call_kind == EVMC_CALLCODE || call_kind == EVMC_DELEGATECALL) {
+  if (code_size > 0) {
     code_data = (uint8_t *)(source + (CODE_OFFSET + 4));
     input_size = *(uint32_t *)(code_data + code_size);
     input_data = input_size > 0 ? code_data + (code_size + 4) : NULL;
@@ -79,8 +80,30 @@ int execute_vm(const uint8_t *source,
 
   int ret = verify_params(signature, call_kind, flags, depth, &tx_origin, &sender, &destination,
                           code_size, code_data, input_size, input_data);
+
 #ifdef CSAL_VALIDATOR_TYPE
   debug_print_int("verify params", ret);
+  if (is_special_call(call_kind)) {
+    /* Since the program already executed in `call` function, do nothing here */
+    contract_info *info = NULL;
+    find_contract_info(&info, global_info_list, global_info_count, &global_current_contract);
+    if (info == NULL) {
+      ckb_debug("can not found contract info");
+      return -111;
+    }
+
+    ret = contract_info_next_program(info);
+    if (ret != CKB_SUCCESS) {
+      return ret;
+    }
+    if (info->program_index == info->program_count) {
+      ret = contract_info_list_verify_complete(global_info_list, global_info_count);
+      if (ret != CKB_SUCCESS) {
+        return ret;
+      }
+    }
+    return 0;
+  }
 #endif
   if (ret != 0) {
     return ret;

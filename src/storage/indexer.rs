@@ -549,10 +549,11 @@ pub struct ContractExtractor {
 pub struct ContractInfo {
     input: Option<(usize, ContractChange)>,
     output: Option<(usize, packed::CellOutput)>,
-    call_index: usize,
     // Increased by 1 after ckb-vm run a program
     program_index: usize,
     programs: Vec<WitnessData>,
+    call_indices: Vec<usize>,
+    special_call_count: usize,
     // Updated by ckb-vm
     logs: Vec<(Vec<H256>, Bytes)>,
     selfdestruct: Option<Bytes>,
@@ -585,6 +586,12 @@ impl ContractInfo {
         }
     }
 
+    pub fn current_call_index(&self) -> usize {
+        self.call_indices[self.program_index]
+    }
+    pub fn current_call_index_mut(&mut self) -> &mut usize {
+        &mut self.call_indices[self.program_index]
+    }
     pub fn current_witness(&self) -> &WitnessData {
         &self.programs[self.program_index]
     }
@@ -696,6 +703,7 @@ impl ContractExtractor {
                     entrance_contract = Some(addr.clone());
                 }
                 info.programs.push(witness_data);
+                info.call_indices.push(0);
                 start += offset;
             }
         }
@@ -721,19 +729,43 @@ impl ContractExtractor {
 
     pub fn run(&mut self) -> Result<(), Box<dyn StdError>> {
         let entrance_contract = self.entrance_contract.clone();
-        self.run_with(&entrance_contract).map(|_| ())
+        self.run_with(&entrance_contract, false).map(|_| ())
     }
 
-    pub fn run_with(&mut self, contract: &ContractAddress) -> Result<Bytes, Box<dyn StdError>> {
+    pub fn run_with(
+        &mut self,
+        contract: &ContractAddress,
+        is_special_call: bool,
+    ) -> Result<Bytes, Box<dyn StdError>> {
         self.current_contract = contract.clone();
-        let (tree_clone, program_data) = {
+        let (tree_clone, saved_program_index, program, program_data) = {
             let info = self
                 .script_groups
-                .get(contract)
+                .get_mut(contract)
                 .ok_or_else(|| format!("No such contract to run: {:x}", contract.0))?;
             let tree_clone = SparseMerkleTree::new(*info.tree.root(), info.tree.store().clone());
-            let program_data = info.current_program_data();
-            (tree_clone, program_data)
+            let saved_program_index = info.program_index;
+            let program_index = if is_special_call {
+                info.special_call_count += 1;
+                info.program_index + info.special_call_count
+            } else {
+                info.program_index
+            };
+            let program = info.programs[program_index].program.clone();
+            let program_data = if program.kind.is_special_call() {
+                let dest_info = self
+                    .script_groups
+                    .get_mut(&program.destination)
+                    .ok_or_else(|| {
+                        format!("No such contract to run: {:x}", program.destination.0)
+                    })?;
+                let program_data = dest_info.current_program_data();
+                dest_info.program_index += 1;
+                program_data
+            } else {
+                info.current_program_data()
+            };
+            (tree_clone, saved_program_index, program, program_data)
         };
         let config = Config::from(&self.run_config);
         let result = match run_with_context(&config, &tree_clone, &program_data, self) {
@@ -747,10 +779,18 @@ impl ContractExtractor {
             .script_groups
             .get_mut(contract)
             .ok_or_else(|| format!("No such contract to run: {:x}", contract.0))?;
-        let return_data = info.current_witness().return_data.clone();
         result.commit(&mut info.tree).unwrap();
-        info.program_index += 1;
-        info.call_index = 0;
+
+        let program_index = if program.kind.is_special_call() {
+            info.program_index + info.special_call_count
+        } else {
+            saved_program_index
+        };
+        let return_data = info.programs[program_index].return_data.clone();
+        if !program.kind.is_special_call() {
+            info.program_index += info.special_call_count + 1;
+            info.special_call_count = 0;
+        }
         Ok(return_data)
     }
 
@@ -851,19 +891,29 @@ impl<Mac: SupportMachine> RunContext<Mac> for ContractExtractor {
                     .script_groups
                     .get_mut(&self.current_contract)
                     .expect("can not find current contract");
-                let destination = info_mut.current_witness().calls[info_mut.call_index]
+                log::debug!(
+                    "address: {:x}, program_index: {}",
+                    self.current_contract.0,
+                    info_mut.program_index
+                );
+                let destination = info_mut.current_witness().calls[info_mut.current_call_index()]
                     .0
                     .clone();
-                info_mut.call_index += 1;
+                *info_mut.current_call_index_mut() += 1;
                 if kind.is_call() {
                     assert_eq!(
                         destination.0, msg_destination,
                         "destination address not match"
                     );
                 };
+                let info_address = if kind.is_special_call() {
+                    self.current_contract.clone()
+                } else {
+                    destination.clone()
+                };
                 let saved_current_contract = self.current_contract.clone();
                 let return_data = self
-                    .run_with(&destination)
+                    .run_with(&info_address, kind.is_special_call())
                     .map_err(|_err| VMError::Unexpected)?;
                 let create_address = if kind.is_create() {
                     destination

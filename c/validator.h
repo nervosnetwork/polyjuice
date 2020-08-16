@@ -626,6 +626,8 @@ int main() {
    * Parse VM source, read values, read proofs from witness content part.
    * Read proofs are validated on the fly.
    */
+  debug_print_data(">> raw witness", content_reader.ptr, content_reader.size);
+  debug_print_int(">> content_reader.size", content_reader.size);
   bool destructed = false;
   while(1) {
     uint32_t source_length = 0;
@@ -634,6 +636,8 @@ int main() {
       return ret;
     }
     /* The end of program */
+    debug_print_int(">> source_length", source_length);
+    debug_print_int(">> content_reader.offset", content_reader.offset);
     if (source_length == 0) {
       break;
     }
@@ -655,6 +659,8 @@ int main() {
     debug_print_int("csal_change_init(&read_changes);", 0);
     uint32_t reads = 0;
     ret = reader_uint32(&content_reader, &reads);
+    debug_print_int(">> reads", reads);
+    debug_print_int(">> content_reader.offset", content_reader.offset);
     if (ret != CKB_SUCCESS) {
       return ret;
     }
@@ -664,10 +670,12 @@ int main() {
     for (uint32_t i = 0; i < reads; i++) {
       uint8_t *key = NULL, *value = NULL;
       ret = reader_bytes(&content_reader, CSAL_KEY_BYTES, &key);
+      debug_print_int(">> content_reader.offset", content_reader.offset);
       if (ret != CKB_SUCCESS) {
         return ret;
       }
       ret = reader_bytes(&content_reader, CSAL_VALUE_BYTES, &value);
+      debug_print_int(">> content_reader.offset", content_reader.offset);
       if (ret != CKB_SUCCESS) {
         return ret;
       }
@@ -679,6 +687,8 @@ int main() {
     uint8_t *proof = NULL;
     uint32_t proof_size = 0;
     ret = reader_uint32(&content_reader, &proof_size);
+    debug_print_int(">> proof_size", proof_size);
+    debug_print_int(">> content_reader.offset", content_reader.offset);
     if (ret != CKB_SUCCESS) {
       return ret;
     }

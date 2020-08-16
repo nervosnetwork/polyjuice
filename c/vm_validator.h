@@ -125,6 +125,8 @@ typedef struct {
   /* Variable */
   contract_program *head_program;
   contract_program *current_program;
+  size_t special_call_total_count;
+  size_t special_call_count;
   size_t program_count;
   size_t program_index;
 } contract_info;
@@ -285,6 +287,7 @@ int contract_info_init(contract_info *info,
   memset(zero_u32, 0, 4);
   uint8_t *buf = info->witness_buf;
   size_t buf_size = witness_size;
+  size_t special_call_total_count = 0;
   size_t program_count = 0;
   contract_program *head_program = NULL;
   contract_program *prev_program = NULL;
@@ -302,6 +305,9 @@ int contract_info_init(contract_info *info,
     }
     current_program->prev_program = prev_program;
     prev_program = current_program;
+    if (is_special_call(current_program->kind)) {
+      special_call_total_count += 1;
+    }
     program_count += 1;
 
     buf += current_program->total_size;
@@ -325,6 +331,7 @@ int contract_info_init(contract_info *info,
   info->code_data = head_program->code_data;
   info->head_program = head_program;
   info->current_program = head_program;
+  info->special_call_total_count = special_call_total_count;
   info->program_count = program_count;
   info->is_main = false;
   return 0;
@@ -353,7 +360,7 @@ int contract_info_next_program(contract_info *info) {
 
   if (global_current_is_main) {
     if (program->call_index != program->calls_count) {
-      ckb_debug("call count not match");
+      ckb_debug("sub program calls not finished");
       return -99;
     }
   }
@@ -367,6 +374,9 @@ int contract_info_list_verify_complete(const contract_info *info_list, const siz
     for (size_t i = 0; i < info_count; i++) {
       const contract_info *info = info_list + i;
       if (info->program_index != info->program_count || info->current_program != NULL) {
+        debug_print_data("address", info->address.bytes, 20);
+        debug_print_int("program_index", info->program_index);
+        debug_print_int("program_count", info->program_count);
         ckb_debug("program not finished");
         return -99;
       }
@@ -445,6 +455,7 @@ int contract_info_reach_program(const contract_info *sender_info,
   return 0;
 }
 
+/* Increase sender contract current program's call_index */
 int contract_info_call(const contract_info *sender_info,
                        const contract_info *dest_info,
                        const evmc_address *tx_origin,
@@ -456,10 +467,14 @@ int contract_info_call(const contract_info *sender_info,
   /* Check call record */
   const call_record call = sender_program->calls[sender_program->call_index];
   if (memcmp(call.destination.bytes, dest_info->address.bytes, 20) != 0) {
+    debug_print_data("call.destination", call.destination.bytes, 20);
+    debug_print_data("dest_info->address", dest_info->address.bytes, 20);
     ckb_debug("call record destination not match");
     return -99;
   }
   if (call.program_index != dest_info->program_index) {
+    debug_print_int("call.program_index", call.program_index);
+    debug_print_int("dest_info.program_index", dest_info->program_index);
     ckb_debug("call record program_index not match");
     return -99;
   }
@@ -538,8 +553,13 @@ int contract_info_call(const contract_info *sender_info,
   }
   res->status_code = EVMC_SUCCESS;
   res->gas_left = msg->gas;
-  res->output_size = dest_program->return_data_size;
-  res->output_data = dest_program->return_data;
+  if (is_special_call(msg->kind)) {
+    res->output_size = sender_program->return_data_size;
+    res->output_data = sender_program->return_data;
+  } else {
+    res->output_size = dest_program->return_data_size;
+    res->output_data = dest_program->return_data;
+  }
   res->release = NULL;
   memset(res->padding, 0, 4);
   sender_program->call_index += 1;
@@ -547,6 +567,7 @@ int contract_info_call(const contract_info *sender_info,
 }
 
 struct evmc_host_context {
+  struct evmc_host_interface *interface;
   csal_change_t *existing_values;
   csal_change_t *changes;
   /* selfdestruct beneficiary */
@@ -644,12 +665,28 @@ void selfdestruct(struct evmc_host_context* context,
 
 struct evmc_result call(struct evmc_host_context* context,
                         const struct evmc_message* msg) {
+  debug_print_int("call().kind : ", msg->kind);
+  debug_print_int("call().flags: ", msg->flags);
+  debug_print_int("call().depth: ", msg->depth);
+  debug_print_data("call().sender     : ", msg->sender.bytes, 20);
+  debug_print_data("call().destination: ", msg->destination.bytes, 20);
+
   int ret;
   struct evmc_result res{};
   contract_info *sender_info = NULL;
   contract_info *dest_info = NULL;
 
-  find_contract_info(&sender_info, global_info_list, global_info_count, &msg->sender);
+  evmc_address *sender_addr = (evmc_address *)&msg->sender;
+  if (msg->kind == EVMC_DELEGATECALL) {
+    sender_addr = &global_current_contract;
+  }
+  if (memcmp(sender_addr->bytes, global_current_contract.bytes, 20) != 0) {
+    /* unexpected sender */
+    res.status_code = EVMC_REVERT;
+    return res;
+  }
+
+  find_contract_info(&sender_info, global_info_list, global_info_count, sender_addr);
   if (sender_info == NULL) {
     res.status_code = EVMC_REVERT;
     return res;
@@ -664,24 +701,71 @@ struct evmc_result call(struct evmc_host_context* context,
   } else {
     memcpy(destination.bytes, msg->destination.bytes, 20);
   }
+
+
   find_contract_info(&dest_info, global_info_list, global_info_count, &destination);
   if (dest_info == NULL) {
     res.status_code = EVMC_REVERT;
     return res;
   }
 
+  contract_program *saved_current_program = sender_info->current_program;
+  size_t saved_program_index = sender_info->program_index;
+  if (is_special_call(msg->kind)) {
+    struct evmc_vm *vm = evmc_create_evmone();
+    sender_info->special_call_count += 1;
+    contract_program *current_program = saved_current_program;
+    size_t current_index = saved_program_index;
+    for (size_t i = 0; i < sender_info->special_call_count; i++) {
+      current_program = current_program->next_program;
+      current_index += 1;
+    }
+    sender_info->current_program = current_program;
+    sender_info->program_index = current_index;
+    res = vm->execute(vm, context->interface, context, EVMC_MAX_REVISION, msg, dest_info->code_data, dest_info->code_size);
+    /* Verify return data */
+    if (sender_info->current_program->return_data_size != res.output_size) {
+      res.status_code = EVMC_REVERT;
+      return res;
+    }
+    if (memcmp(sender_info->current_program->return_data, res.output_data, res.output_size) != 0) {
+      res.status_code = EVMC_REVERT;
+      return res;
+    }
+  }
+
   if (global_current_is_main) {
+    /* TODO: refactor this logic (remove `saved_xxx`) */
+    contract_info *active_info = dest_info;
+    if (is_special_call(msg->kind)) {
+      active_info = sender_info;
+    }
+    contract_program *saved_dest_current_program = dest_info->current_program;
+    size_t saved_dest_program_index = dest_info->program_index;
+    ret = contract_info_process_calls(active_info, global_info_list, global_info_count);
+    dest_info->current_program = saved_dest_current_program;
+    dest_info->program_index = saved_dest_program_index;
+    if (ret != CKB_SUCCESS) {
+      res.status_code = EVMC_REVERT;
+      return res;
+    }
+
+    sender_info->current_program = saved_current_program;
+    sender_info->program_index = saved_program_index;
     ret = contract_info_call(sender_info, dest_info, &global_tx_context.tx_origin, msg, &res);
     if (ret != CKB_SUCCESS) {
       res.status_code = EVMC_REVERT;
       return res;
     }
-    ret = contract_info_process_calls(dest_info, global_info_list, global_info_count);
+
+    ret = contract_info_next_program(dest_info);
     if (ret != CKB_SUCCESS) {
       res.status_code = EVMC_REVERT;
       return res;
     }
   } else {
+    sender_info->current_program = saved_current_program;
+    sender_info->program_index = saved_program_index;
     /* Increase destination contract's program_index fit sender's call record */
     ret = contract_info_reach_program(sender_info, dest_info);
     if (ret != CKB_SUCCESS) {
@@ -699,7 +783,6 @@ struct evmc_result call(struct evmc_host_context* context,
       return res;
     }
   }
-
   return res;
 }
 
@@ -943,8 +1026,8 @@ inline int verify_params(const uint8_t *signature_data,
             ckb_debug("main signature is not in first program");
             return -100;
           }
-          if (info->program_count != 1) {
-            ckb_debug("main contract only allow 1 program");
+          if ((info->program_count - info->special_call_total_count) != 1) {
+            ckb_debug("main contract only allow 1 normal(not CALLCODE/DELEGATECALL) program");
             return -100;
           }
           if (has_entrance_signature) {
@@ -970,7 +1053,9 @@ inline int verify_params(const uint8_t *signature_data,
      * - verify code_hash not changed
      * - verify code_hash in data filed match the blake2b_h256(code_data)
      */
-    if (!is_create(call_kind)) {
+    if (call_kind == EVMC_CALL
+        || (is_special_call(call_kind)
+            && memcmp(destination->bytes, global_current_contract.bytes, 20) == 0)) {
       uint8_t code_hash[32];
       blake2b_init(&blake2b_ctx, 32);
       blake2b_update(&blake2b_ctx, code_data, code_size);
@@ -1117,72 +1202,77 @@ inline int verify_params(const uint8_t *signature_data,
 
   /* Verify sender by signature field */
   if (global_current_is_main) {
-    ckb_debug("Verify EoA sender signature");
-    uint8_t tx_hash[32];
-    len = 32;
-    ret = ckb_load_tx_hash(tx_hash, &len, 0);
-    if (ret != CKB_SUCCESS) {
-      ckb_debug("load tx hash failed");
-      return ret;
-    }
-    blake2b_init(&blake2b_ctx, 32);
-    blake2b_update(&blake2b_ctx, tx_hash, 32);
-
-    for (size_t info_idx = 0; info_idx < global_info_count; info_idx++) {
-      contract_info *info = &global_info_list[info_idx];
-      memcpy(witness_buf, info->witness_buf, info->witness_size);
-      if (info->is_main) {
-        memset(witness_buf + 4, 0, 65);
+    if (is_special_call(call_kind)) {
+      /* do nothing */
+      ckb_debug("special call don't verify sender signature");
+    } else {
+      ckb_debug("Verify EoA sender signature");
+      uint8_t tx_hash[32];
+      len = 32;
+      ret = ckb_load_tx_hash(tx_hash, &len, 0);
+      if (ret != CKB_SUCCESS) {
+        ckb_debug("load tx hash failed");
+        return ret;
       }
-      blake2b_update(&blake2b_ctx, witness_buf, info->witness_size);
-    }
+      blake2b_init(&blake2b_ctx, 32);
+      blake2b_update(&blake2b_ctx, tx_hash, 32);
 
-    // Verify EoA account call contract
-    uint8_t sign_message[32];
-    blake2b_final(&blake2b_ctx, sign_message, 32);
+      for (size_t info_idx = 0; info_idx < global_info_count; info_idx++) {
+        contract_info *info = &global_info_list[info_idx];
+        memcpy(witness_buf, info->witness_buf, info->witness_size);
+        if (info->is_main) {
+          memset(witness_buf + 4, 0, 65);
+        }
+        blake2b_update(&blake2b_ctx, witness_buf, info->witness_size);
+      }
 
-    /* Load signature */
-    secp256k1_context context;
-    uint8_t secp_data[CKB_SECP256K1_DATA_SIZE];
-    ret = ckb_secp256k1_custom_verify_only_initialize(&context, secp_data);
-    if (ret != 0) {
-      debug_print_int("ckb_secp256k1_custom_verify_only_initialize", ret);
-      return ret;
-    }
+      // Verify EoA account call contract
+      uint8_t sign_message[32];
+      blake2b_final(&blake2b_ctx, sign_message, 32);
 
-    int recid = (int)signature_data[64];
-    secp256k1_ecdsa_recoverable_signature signature;
-    if (secp256k1_ecdsa_recoverable_signature_parse_compact(&context, &signature, signature_data, recid) == 0) {
-      return -92;
-    }
+      /* Load signature */
+      secp256k1_context context;
+      uint8_t secp_data[CKB_SECP256K1_DATA_SIZE];
+      ret = ckb_secp256k1_custom_verify_only_initialize(&context, secp_data);
+      if (ret != 0) {
+        debug_print_int("ckb_secp256k1_custom_verify_only_initialize", ret);
+        return ret;
+      }
 
-    /* Recover pubkey */
-    secp256k1_pubkey pubkey;
-    if (secp256k1_ecdsa_recover(&context, &pubkey, &signature, sign_message) != 1) {
-      return -93;
-    }
+      int recid = (int)signature_data[64];
+      secp256k1_ecdsa_recoverable_signature signature;
+      if (secp256k1_ecdsa_recoverable_signature_parse_compact(&context, &signature, signature_data, recid) == 0) {
+        return -92;
+      }
 
-    /* Check pubkey hash */
-    uint8_t temp[65];
-    size_t pubkey_size = 33;
-    if (secp256k1_ec_pubkey_serialize(&context, temp,
-                                      &pubkey_size, &pubkey,
-                                      SECP256K1_EC_COMPRESSED) != 1) {
-      return -94;
-    }
-    blake2b_init(&blake2b_ctx, 32);
-    blake2b_update(&blake2b_ctx, temp, pubkey_size);
-    blake2b_final(&blake2b_ctx, temp, 32);
+      /* Recover pubkey */
+      secp256k1_pubkey pubkey;
+      if (secp256k1_ecdsa_recover(&context, &pubkey, &signature, sign_message) != 1) {
+        return -93;
+      }
 
-    /* Verify entrance program sender */
-    if (memcmp(sender->bytes, temp, 20) != 0) {
-      ckb_debug("EoA sender not match the signature");
-      return -95;
-    }
-    /* Verify tx_origin */
-    if (memcmp(sender->bytes, tx_origin->bytes, 20) != 0) {
-      ckb_debug("Sender is not tx_origin");
-      return -96;
+      /* Check pubkey hash */
+      uint8_t temp[65];
+      size_t pubkey_size = 33;
+      if (secp256k1_ec_pubkey_serialize(&context, temp,
+                                        &pubkey_size, &pubkey,
+                                        SECP256K1_EC_COMPRESSED) != 1) {
+        return -94;
+      }
+      blake2b_init(&blake2b_ctx, 32);
+      blake2b_update(&blake2b_ctx, temp, pubkey_size);
+      blake2b_final(&blake2b_ctx, temp, 32);
+
+      /* Verify entrance program sender */
+      if (memcmp(sender->bytes, temp, 20) != 0) {
+        ckb_debug("EoA sender not match the signature");
+        return -95;
+      }
+      /* Verify tx_origin */
+      if (memcmp(sender->bytes, tx_origin->bytes, 20) != 0) {
+        ckb_debug("Sender is not tx_origin");
+        return -96;
+      }
     }
   } else {
     bool found_sender_contract = false;
@@ -1206,7 +1296,8 @@ inline int verify_params(const uint8_t *signature_data,
   }
 
   /* Verify destination match current script args */
-  if (memcmp(destination->bytes, global_current_contract.bytes, CSAL_SCRIPT_ARGS_LEN) != 0) {
+  if (!is_special_call(call_kind)
+      && memcmp(destination->bytes, global_current_contract.bytes, CSAL_SCRIPT_ARGS_LEN) != 0) {
     ckb_debug("ERROR: destination not match current script args");
     return -98;
   }
@@ -1220,10 +1311,11 @@ inline int verify_params(const uint8_t *signature_data,
 
 inline void context_init(struct evmc_host_context* context,
                          struct evmc_vm *_vm,
-                         struct evmc_host_interface *_interface,
+                         struct evmc_host_interface *interface,
                          evmc_address tx_origin,
                          csal_change_t *existing_values,
                          csal_change_t *changes) {
+  context->interface = interface;
   context->existing_values = existing_values;
   context->changes = changes;
   context->destructed = false;
@@ -1308,6 +1400,8 @@ inline int verify_result(struct evmc_host_context* context,
       return ret;
     }
   }
+  /* Reset special call count */
+  info->special_call_count = 0;
 
   return 0;
 }

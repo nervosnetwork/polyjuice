@@ -1,6 +1,6 @@
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_simple_account_layer::{
-    run_with_context, CkbBlake2bHasher, Config, RunContext, RunProofResult,
+    run_with_context, CkbBlake2bHasher, Config, RunContext, RunProofResult, RunResult,
 };
 use ckb_types::{
     bytes::{BufMut, Bytes, BytesMut},
@@ -121,6 +121,8 @@ pub struct ContractInfo {
     // input and selfdestruct can not both empty (invoke selfdestruct in a constructor?)
     pub input: Option<ContractInput>,
     pub selfdestruct: Option<Bytes>,
+    pub run_result: RunResult,
+    execute_index: usize,
     // (program, logs, return_data, run_proof)
     execute_records: Vec<ExecuteRecord>,
 }
@@ -175,15 +177,13 @@ impl ExecuteRecord {
     pub fn witness_data(&self, first_program: bool) -> WitnessData {
         // This optmize is for reducing witness size by remove duplicated code field
         let mut program = self.program.clone();
-        if !first_program
-            && self.program.kind != CallKind::CALLCODE
-            && self.program.kind != CallKind::DELEGATECALL
-        {
+        if !first_program {
             program.code = Bytes::default();
         }
         for (dest, program_index) in &self.calls {
             log::debug!("[call]: ({:x}, {})", dest.0, program_index);
         }
+        log::debug!("[run_proof]: {}", hex::encode(&self.run_proof));
         WitnessData {
             signature: Bytes::from(vec![0u8; 65]),
             program,
@@ -206,8 +206,10 @@ impl ContractInfo {
             input,
             tree,
             code: Bytes::default(),
+            execute_index: 0,
             execute_records: Vec::new(),
             selfdestruct: None,
+            run_result: RunResult::default(),
         }
     }
 
@@ -227,6 +229,11 @@ impl ContractInfo {
     }
 
     pub fn output_data(&self) -> Bytes {
+        log::debug!(
+            "[address]: {:x}, storage_root: {:x}",
+            self.address.0,
+            self.storage_root(),
+        );
         ContractCell::new(self.storage_root(), self.code_hash()).serialize()
     }
 
@@ -259,6 +266,16 @@ impl ContractInfo {
             .selfdestruct
             .as_ref()
             .map(|data| H160::from_slice(data.as_ref()).unwrap());
+        for witness_data in &witness_data_vec {
+            let program = &witness_data.program;
+            log::debug!("[address]    : {:x}", self.address.0);
+            log::debug!("[kind]       : {:?}", program.kind);
+            log::debug!("[sender]     : {:x}", program.sender);
+            log::debug!("[destination]: {:x}", program.destination.0);
+            log::debug!("[input]      : {}", hex::encode(&program.input));
+            log::debug!("[code]       : {}", hex::encode(&program.code));
+            log::debug!("----------------------------------------------");
+        }
         log::info!(
             "contract {} have {} program",
             self.execute_records[0].program.destination.0,
@@ -289,21 +306,25 @@ impl ContractInfo {
             self.code = program.code.clone();
         }
         self.execute_records.push(ExecuteRecord::new(program));
+        self.execute_index = self.execute_records.len();
     }
 
     pub fn get_last_call(&self) -> u32 {
-        (self.execute_records.len() - 1) as u32
+        (self.execute_index - 1) as u32
     }
 
     pub fn current_return_data(&self) -> &Bytes {
         &self.current_record().return_data
     }
     pub fn current_record(&self) -> &ExecuteRecord {
-        self.execute_records.last().unwrap()
+        &self.execute_records[self.execute_index - 1]
     }
 
     pub fn current_record_mut(&mut self) -> &mut ExecuteRecord {
-        self.execute_records.last_mut().unwrap()
+        &mut self.execute_records[self.execute_index - 1]
+    }
+    pub fn last_record_mut(&mut self) -> &mut ExecuteRecord {
+        &mut self.execute_records[self.execute_index - 2]
     }
 }
 
@@ -529,6 +550,47 @@ impl CsalRunContext {
         Ok(tx.data())
     }
 
+    // Add CALLCODE/DELEGATECALL program for callee
+    pub fn add_special_call(&mut self, program: Program) -> Result<(), Box<dyn StdError>> {
+        let info_address = program.destination.clone();
+        let (contract_input_opt, tree) = self
+            .get_contract_info(&info_address)
+            .map::<Result<_, String>, _>(|info| {
+                let input_opt: Option<ContractInput> = info.input.clone();
+                let tree = SparseMerkleTree::new(*info.tree.root(), info.tree.store().clone());
+                Ok((input_opt, tree))
+            })
+            .unwrap_or_else(|| {
+                let change = self.loader.load_latest_contract_change(
+                    info_address.clone(),
+                    None,
+                    false,
+                    false,
+                )?;
+                let (output, data) = self
+                    .loader
+                    .load_contract_live_cell(change.tx_hash.clone(), change.output_index)?;
+                let input = ContractInput::new(change.out_point(), output, data);
+                Ok((Some(input), change.merkle_tree()))
+            })?;
+
+        let empty_run_proof = Bytes::from(RunProofResult::default().serialize_pure().unwrap());
+        log::debug!("empty_run_proof: {}", hex::encode(&empty_run_proof));
+        if let Some(contract_index) = self.get_contract_index(&info_address) {
+            self.contract_index = contract_index;
+            let info = &mut self.contracts[contract_index].1;
+            info.add_record(program);
+            info.current_record_mut().run_proof = empty_run_proof;
+        } else {
+            self.contract_index = self.contracts.len();
+            let mut info = ContractInfo::new(info_address.clone(), contract_input_opt, tree);
+            info.add_record(program);
+            info.current_record_mut().run_proof = empty_run_proof;
+            self.contracts.push((info_address, info));
+        }
+        Ok(())
+    }
+
     pub fn run(&mut self, mut program: Program) -> Result<(), Box<dyn StdError>> {
         if self.contracts.is_empty() {
             self.set_entrance_program(program.clone())?;
@@ -570,9 +632,10 @@ impl CsalRunContext {
         let destination = self.destination(&program, self.contracts.len() as u64);
         if program.is_create() {
             info_address = destination.clone();
-            program.destination = destination.clone();
+            program.destination = destination;
         }
 
+        log::debug!("[contract]: {:x}", info_address.0);
         if let Some(contract_index) = self.get_contract_index(&info_address) {
             self.contract_index = contract_index;
             let info = &mut self.contracts[contract_index].1;
@@ -584,12 +647,13 @@ impl CsalRunContext {
             self.contracts.push((info_address, info));
         }
 
-        let program_data = WitnessData::new(program).program_data();
+        let program_data = WitnessData::new(program.clone()).program_data();
         log::debug!(
             "[length]: {}",
             hex::encode(&(program_data.len() as u32).to_le_bytes()[..])
         );
         log::debug!("[binary]: {}", hex::encode(program_data.as_ref()));
+        let saved_execute_index = self.current_contract_info().execute_index;
         let config = Config::from(&self.run_config);
         let result = match run_with_context(&config, &new_tree, &program_data, self) {
             Ok(result) => result,
@@ -599,15 +663,33 @@ impl CsalRunContext {
             }
         };
         let current_info = self.current_contract_info_mut();
-        // Update storage tree
-        let proof = result.generate_proof(&new_tree)?;
-        print_proof(&proof);
-        result.commit(&mut new_tree).unwrap();
-        current_info.tree = new_tree;
-        // Update run_proof
-        current_info.current_record_mut().run_proof = Bytes::from(proof.serialize_pure().unwrap());
-        if !proof.write_values.is_empty() {
-            self.state_changed = true;
+        current_info.execute_index = saved_execute_index;
+
+        current_info
+            .run_result
+            .read_values
+            .extend(result.read_values);
+        current_info
+            .run_result
+            .write_values
+            .extend(result.write_values);
+        if program.kind.is_special_call() {
+            current_info.tree = new_tree;
+            current_info.current_record_mut().run_proof =
+                Bytes::from(RunProofResult::default().serialize_pure().unwrap());
+        } else {
+            let run_result = std::mem::take(&mut current_info.run_result);
+            let proof = run_result.generate_proof(&new_tree)?;
+            print_proof(&proof);
+            run_result.commit(&mut new_tree).unwrap();
+            // Update storage tree
+            current_info.tree = new_tree;
+            // Update run_proof
+            current_info.current_record_mut().run_proof =
+                Bytes::from(proof.serialize_pure().unwrap());
+            if !run_result.write_values.is_empty() {
+                self.state_changed = true;
+            }
         }
         Ok(())
     }
@@ -866,18 +948,36 @@ impl<Mac: SupportMachine> RunContext<Mac> for CsalRunContext {
                 };
                 let saved_contract_index = self.contract_index;
                 let destination = self.destination(&program, self.contracts.len() as u64);
-                self.run(program).map_err(|_err| VMError::Unexpected)?;
+                self.run(program.clone())
+                    .map_err(|_err| VMError::Unexpected)?;
+                // Must after run the program
+                if kind.is_special_call() {
+                    self.add_special_call(program)
+                        .map_err(|_err| VMError::Unexpected)?;
+                }
                 self.contract_index = saved_contract_index;
-                let (dest_program_index, dest_return_data) = {
-                    let dest_info = self
-                        .get_contract_info(&destination)
-                        .expect("get contract info");
-                    let program_index = dest_info.get_last_call();
-                    let return_data = dest_info.current_return_data().clone();
-                    (program_index, return_data)
+                let info_address = if kind.is_special_call() {
+                    self.current_contract_address().clone()
+                } else {
+                    destination.clone()
                 };
-                self.current_contract_info_mut()
-                    .current_record_mut()
+                let dest_return_data = self
+                    .get_contract_info(&info_address)
+                    .expect("get contract info")
+                    .current_return_data()
+                    .clone();
+                let dest_program_index = self
+                    .get_contract_info(&destination)
+                    .expect("get contract info")
+                    .get_last_call();
+
+                log::debug!("dest_program_index: {}", dest_program_index);
+                let record_mut = if kind.is_special_call() {
+                    self.current_contract_info_mut().last_record_mut()
+                } else {
+                    self.current_contract_info_mut().current_record_mut()
+                };
+                record_mut
                     .calls
                     .push((destination.clone(), dest_program_index));
                 let create_address = if kind.is_create() {

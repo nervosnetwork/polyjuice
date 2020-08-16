@@ -44,6 +44,7 @@ CALL_CONTRACT = "CallContract"
 CALL_MULTI = "CallMultipleTimes"
 CALL_SELFDESTRUCT = "CallSelfDestruct"
 BLOCK_INFO = "BlockInfo"
+DELEGATECALL = "DelegateCall"
 
 contracts_binary = {
     SIMPLE_STORAGE: open(os.path.join(evm_contracts_dir, 'SimpleStorage.bin'), 'r').read().strip(),
@@ -56,7 +57,11 @@ contracts_binary = {
     CALL_MULTI: open(os.path.join(evm_contracts_dir, 'CallMultipleTimes.bin'), 'r').read().strip(),
     CALL_SELFDESTRUCT: open(os.path.join(evm_contracts_dir, 'CallSelfDestruct.bin'), 'r').read().strip(),
     BLOCK_INFO: open(os.path.join(evm_contracts_dir, 'BlockInfo.bin'), 'r').read().strip(),
+    DELEGATECALL: open(os.path.join(evm_contracts_dir, 'DelegateCall.bin'), 'r').read().strip(),
 }
+
+def addr_to_arg(addr):
+    return "000000000000000000000000{}".format(addr[2:])
 
 def to_uint(number):
     output = hex(number)[2:]
@@ -329,6 +334,35 @@ def test_get_block_info():
 
     print("[Finish]: {}\n".format(contract_name))
 
+
+def test_delegatecall():
+    contract_name = DELEGATECALL
+    print("[Start]: {}\n".format(contract_name))
+    contract_address = create_contract_by_name(contract_name)
+    static_call_args = "0x6d4ce63c"
+    result = call_contract(contract_address, static_call_args, is_static=True)
+    assert result["return_data"] == "0x000000000000000000000000000000000000000000000000000000000000007b"
+
+    ss_address = create_contract_by_name(SIMPLE_STORAGE)
+    print("create SimpleStorage contract({}) for {}".format(ss_address, contract_name))
+
+    call_args = "0x3825d828{}{}".format(
+        addr_to_arg(ss_address),
+        "0000000000000000000000000000000000000000000000000000000000000022"
+    )
+    result = call_contract(contract_address, call_args)
+    action_name = "call-{}-{}-{}".format(contract_name, contract_address, call_args)
+    commit_tx(result, action_name[:42])
+
+    result = call_contract(contract_address, static_call_args, is_static=True)
+    assert result["return_data"] == "0x0000000000000000000000000000000000000000000000000000000000000022"
+    result = call_contract(ss_address, static_call_args, is_static=True)
+    assert result["return_data"] == "0x000000000000000000000000000000000000000000000000000000000000007b"
+    # TODO:
+    #  1. call delegatecall multiple times
+    #  2. call delegatecall then other action change current storage
+    print("[Finish]: {}\n".format(contract_name))
+
 def main():
     test_simple_storage()
     test_log_events()
@@ -340,6 +374,7 @@ def main():
     test_call_multiple_times()
     test_call_selfdestruct()
     test_get_block_info()
+    test_delegatecall()
 
 if __name__ == "__main__":
     main()

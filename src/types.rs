@@ -274,6 +274,9 @@ impl CallKind {
     pub fn is_create(&self) -> bool {
         *self == CallKind::CREATE || *self == CallKind::CREATE2
     }
+    pub fn is_special_call(&self) -> bool {
+        *self == CallKind::CALLCODE || *self == CallKind::DELEGATECALL
+    }
     pub fn is_call(&self) -> bool {
         !self.is_create()
     }
@@ -464,6 +467,9 @@ impl WitnessData {
     pub fn serialize(&self) -> Bytes {
         let mut buf = BytesMut::default();
         let program_data = self.program_data();
+        log::debug!(">> program_data.len() = {}", program_data.len());
+        log::debug!(">> program_data = {}", hex::encode(&program_data));
+        log::debug!(">> run_proof = {}", hex::encode(&self.run_proof));
         buf.put(&(program_data.len() as u32).to_le_bytes()[..]);
         buf.put(program_data.as_ref());
         buf.put(self.run_proof.as_ref());
