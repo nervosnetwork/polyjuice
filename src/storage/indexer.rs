@@ -1,6 +1,6 @@
 use bincode::serialize;
 use ckb_jsonrpc_types::{JsonBytes, ScriptHashType};
-use ckb_simple_account_layer::{run_with_context, CkbBlake2bHasher, Config, RunContext};
+use ckb_simple_account_layer::{run_with_context, CkbBlake2bHasher, Config, RunContext, RunResult};
 use ckb_types::{
     bytes::{BufMut, Bytes, BytesMut},
     core, packed,
@@ -23,9 +23,9 @@ use std::time::Duration;
 use super::{db_get, value, Key, Loader};
 use crate::client::HttpRpcClient;
 use crate::types::{
-    parse_log, smth256_to_h256, vm_load_data, vm_load_h160, vm_load_h256, vm_load_i32, vm_load_i64,
-    vm_load_u32, vm_load_u8, CallKind, ContractAddress, ContractChange, ContractMeta, EoaAddress,
-    RunConfig, WitnessData,
+    h256_to_smth256, parse_log, smth256_to_h256, vm_load_data, vm_load_h160, vm_load_h256,
+    vm_load_i32, vm_load_i64, vm_load_u32, vm_load_u8, CallKind, ContractAddress, ContractChange,
+    ContractMeta, EoaAddress, RunConfig, WitnessData,
 };
 
 pub const TYPE_ARGS_LEN: usize = 20;
@@ -556,6 +556,7 @@ pub struct ContractInfo {
     special_call_count: usize,
     // Updated by ckb-vm
     logs: Vec<(Vec<H256>, Bytes)>,
+    pub run_result: RunResult,
     selfdestruct: Option<Bytes>,
     // Updated by ckb-vm
     tree: SparseMerkleTree<CkbBlake2bHasher, SmtH256, DefaultStore<SmtH256>>,
@@ -768,7 +769,7 @@ impl ContractExtractor {
             (tree_clone, saved_program_index, program, program_data)
         };
         let config = Config::from(&self.run_config);
-        let result = match run_with_context(&config, &tree_clone, &program_data, self) {
+        let _result = match run_with_context(&config, &tree_clone, &program_data, self) {
             Ok(result) => result,
             Err(err) => {
                 log::warn!("Error: {:?}", err);
@@ -779,7 +780,6 @@ impl ContractExtractor {
             .script_groups
             .get_mut(contract)
             .ok_or_else(|| format!("No such contract to run: {:x}", contract.0))?;
-        result.commit(&mut info.tree).unwrap();
 
         let program_index = if program.kind.is_special_call() {
             info.program_index + info.special_call_count
@@ -788,6 +788,8 @@ impl ContractExtractor {
         };
         let return_data = info.programs[program_index].return_data.clone();
         if !program.kind.is_special_call() {
+            let run_result = std::mem::take(&mut info.run_result);
+            run_result.commit(&mut info.tree).unwrap();
             info.program_index += info.special_call_count + 1;
             info.special_call_count = 0;
         }
@@ -837,6 +839,47 @@ impl<Mac: SupportMachine> RunContext<Mac> for ContractExtractor {
 
                 let s = String::from_utf8(buffer).map_err(|_| VMError::ParseError)?;
                 log::debug!("ckb_debug: {}", s);
+                Ok(true)
+            }
+            // insert
+            3073 => {
+                let key_address = machine.registers()[A0].to_u64();
+                let key = vm_load_h256(machine, key_address)?;
+                let value_address = machine.registers()[A1].to_u64();
+                let value = vm_load_h256(machine, value_address)?;
+                log::debug!("[set_storage] key={:x}, value={:x}", key, value);
+                let info = self.script_groups.get_mut(&self.current_contract).unwrap();
+                info.run_result
+                    .write_values
+                    .insert(h256_to_smth256(&key), h256_to_smth256(&value));
+                machine.set_register(A0, Mac::REG::from_u64(0));
+                Ok(true)
+            }
+            // fetch
+            3074 => {
+                let key_address = machine.registers()[A0].to_u64();
+                let key = vm_load_h256(machine, key_address)?;
+                let value_address = machine.registers()[A1].to_u64();
+                log::debug!("[get_storage] key {:x}", key);
+
+                let smth256_key = h256_to_smth256(&key);
+                let info = self.script_groups.get_mut(&self.current_contract).unwrap();
+                let value = match info.run_result.write_values.get(&smth256_key) {
+                    Some(value) => *value,
+                    None => {
+                        let tree_value = info
+                            .tree
+                            .get(&smth256_key)
+                            .map_err(|_| VMError::Unexpected)?;
+                        if tree_value != SmtH256::default() {
+                            info.run_result.read_values.insert(smth256_key, tree_value);
+                        }
+                        tree_value
+                    }
+                };
+                machine
+                    .memory_mut()
+                    .store_bytes(value_address, value.as_slice())?;
                 Ok(true)
             }
             // return

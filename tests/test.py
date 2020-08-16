@@ -346,18 +346,28 @@ def test_delegatecall():
     ss_address = create_contract_by_name(SIMPLE_STORAGE)
     print("create SimpleStorage contract({}) for {}".format(ss_address, contract_name))
 
-    call_args = "0x3825d828{}{}".format(
-        addr_to_arg(ss_address),
-        "0000000000000000000000000000000000000000000000000000000000000022"
-    )
-    result = call_contract(contract_address, call_args)
-    action_name = "call-{}-{}-{}".format(contract_name, contract_address, call_args)
-    commit_tx(result, action_name[:42])
+    fn_set = "3825d828"
+    fn_overwrite = "3144564b"
+    fn_multi_call = "c6c211e9"
+    for (fn_name, expected) in [
+            (fn_set, "0x0000000000000000000000000000000000000000000000000000000000000022"),
+            (fn_overwrite, "0x0000000000000000000000000000000000000000000000000000000000000023"),
+            (fn_multi_call, "0x0000000000000000000000000000000000000000000000000000000000000024"),
+    ]:
+        call_args = "0x{}{}{}".format(
+            fn_name,
+            addr_to_arg(ss_address),
+            "0000000000000000000000000000000000000000000000000000000000000022"
+        )
+        result = call_contract(contract_address, call_args)
+        action_name = "call-{}-{}-{}".format(contract_name, contract_address, call_args)
+        commit_tx(result, action_name[:42])
 
-    result = call_contract(contract_address, static_call_args, is_static=True)
-    assert result["return_data"] == "0x0000000000000000000000000000000000000000000000000000000000000022"
-    result = call_contract(ss_address, static_call_args, is_static=True)
-    assert result["return_data"] == "0x000000000000000000000000000000000000000000000000000000000000007b"
+        result = call_contract(contract_address, static_call_args, is_static=True)
+        print("return: {}, expected: {}".format(result["return_data"], expected))
+        assert result["return_data"] == expected
+        result = call_contract(ss_address, static_call_args, is_static=True)
+        assert result["return_data"] == "0x000000000000000000000000000000000000000000000000000000000000007b"
     # TODO:
     #  1. call delegatecall multiple times
     #  2. call delegatecall then other action change current storage

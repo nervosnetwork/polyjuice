@@ -22,10 +22,10 @@ use std::error::Error as StdError;
 
 use super::Loader;
 use crate::types::{
-    parse_log, smth256_to_h256, vm_load_data, vm_load_h160, vm_load_h256, vm_load_i32, vm_load_i64,
-    vm_load_u32, vm_load_u8, CallKind, ContractAddress, ContractCell, EoaAddress, Program,
-    RunConfig, WitnessData, ALWAYS_SUCCESS_SCRIPT, MIN_CELL_CAPACITY, ONE_CKB, SIGHASH_CELL_DEP,
-    SIGHASH_TYPE_HASH,
+    h256_to_smth256, parse_log, smth256_to_h256, vm_load_data, vm_load_h160, vm_load_h256,
+    vm_load_i32, vm_load_i64, vm_load_u32, vm_load_u8, CallKind, ContractAddress, ContractCell,
+    EoaAddress, Program, RunConfig, WitnessData, ALWAYS_SUCCESS_SCRIPT, MIN_CELL_CAPACITY, ONE_CKB,
+    SIGHASH_CELL_DEP, SIGHASH_TYPE_HASH,
 };
 
 pub struct Runner {
@@ -125,6 +125,7 @@ pub struct ContractInfo {
     execute_index: usize,
     // (program, logs, return_data, run_proof)
     execute_records: Vec<ExecuteRecord>,
+    current_calls: Vec<(ContractAddress, u32)>,
 }
 
 #[derive(Clone)]
@@ -210,12 +211,12 @@ impl ContractInfo {
             execute_records: Vec::new(),
             selfdestruct: None,
             run_result: RunResult::default(),
+            current_calls: Default::default(),
         }
     }
 
     // The storage tree root hash
     pub fn storage_root(&self) -> H256 {
-        // FIXME: fix this later (SMT must ensure the consistency)
         smth256_to_h256(self.tree.root())
     }
     // The contract code hash
@@ -322,9 +323,6 @@ impl ContractInfo {
 
     pub fn current_record_mut(&mut self) -> &mut ExecuteRecord {
         &mut self.execute_records[self.execute_index - 1]
-    }
-    pub fn last_record_mut(&mut self) -> &mut ExecuteRecord {
-        &mut self.execute_records[self.execute_index - 2]
     }
 }
 
@@ -655,7 +653,7 @@ impl CsalRunContext {
         log::debug!("[binary]: {}", hex::encode(program_data.as_ref()));
         let saved_execute_index = self.current_contract_info().execute_index;
         let config = Config::from(&self.run_config);
-        let result = match run_with_context(&config, &new_tree, &program_data, self) {
+        let _result = match run_with_context(&config, &new_tree, &program_data, self) {
             Ok(result) => result,
             Err(err) => {
                 log::warn!("Error: {:?}", err);
@@ -665,16 +663,7 @@ impl CsalRunContext {
         let current_info = self.current_contract_info_mut();
         current_info.execute_index = saved_execute_index;
 
-        current_info
-            .run_result
-            .read_values
-            .extend(result.read_values);
-        current_info
-            .run_result
-            .write_values
-            .extend(result.write_values);
         if program.kind.is_special_call() {
-            current_info.tree = new_tree;
             current_info.current_record_mut().run_proof =
                 Bytes::from(RunProofResult::default().serialize_pure().unwrap());
         } else {
@@ -687,6 +676,8 @@ impl CsalRunContext {
             // Update run_proof
             current_info.current_record_mut().run_proof =
                 Bytes::from(proof.serialize_pure().unwrap());
+            current_info.current_record_mut().calls =
+                std::mem::take(&mut current_info.current_calls);
             if !run_result.write_values.is_empty() {
                 self.state_changed = true;
             }
@@ -850,6 +841,48 @@ impl<Mac: SupportMachine> RunContext<Mac> for CsalRunContext {
                 log::debug!("ckb_debug: {}", s);
                 Ok(true)
             }
+
+            // insert
+            3073 => {
+                let key_address = machine.registers()[A0].to_u64();
+                let key = vm_load_h256(machine, key_address)?;
+                let value_address = machine.registers()[A1].to_u64();
+                let value = vm_load_h256(machine, value_address)?;
+                log::debug!("[set_storage] key={:x}, value={:x}", key, value);
+                self.current_contract_info_mut()
+                    .run_result
+                    .write_values
+                    .insert(h256_to_smth256(&key), h256_to_smth256(&value));
+                machine.set_register(A0, Mac::REG::from_u64(0));
+                Ok(true)
+            }
+            // fetch
+            3074 => {
+                let key_address = machine.registers()[A0].to_u64();
+                let key = vm_load_h256(machine, key_address)?;
+                let value_address = machine.registers()[A1].to_u64();
+                log::debug!("[get_storage] key {:x}", key);
+
+                let smth256_key = h256_to_smth256(&key);
+                let info = self.current_contract_info_mut();
+                let value = match info.run_result.write_values.get(&smth256_key) {
+                    Some(value) => *value,
+                    None => {
+                        let tree_value = info
+                            .tree
+                            .get(&smth256_key)
+                            .map_err(|_| VMError::Unexpected)?;
+                        if tree_value != SmtH256::default() {
+                            info.run_result.read_values.insert(smth256_key, tree_value);
+                        }
+                        tree_value
+                    }
+                };
+                machine
+                    .memory_mut()
+                    .store_bytes(value_address, value.as_slice())?;
+                Ok(true)
+            }
             // return
             3075 => {
                 let data_address = machine.registers()[A0].to_u64();
@@ -954,7 +987,7 @@ impl<Mac: SupportMachine> RunContext<Mac> for CsalRunContext {
                 if kind.is_special_call() {
                     self.add_special_call(program)
                         .map_err(|_err| VMError::Unexpected)?;
-                }
+                };
                 self.contract_index = saved_contract_index;
                 let info_address = if kind.is_special_call() {
                     self.current_contract_address().clone()
@@ -972,13 +1005,8 @@ impl<Mac: SupportMachine> RunContext<Mac> for CsalRunContext {
                     .get_last_call();
 
                 log::debug!("dest_program_index: {}", dest_program_index);
-                let record_mut = if kind.is_special_call() {
-                    self.current_contract_info_mut().last_record_mut()
-                } else {
-                    self.current_contract_info_mut().current_record_mut()
-                };
-                record_mut
-                    .calls
+                self.current_contract_info_mut()
+                    .current_calls
                     .push((destination.clone(), dest_program_index));
                 let create_address = if kind.is_create() {
                     destination

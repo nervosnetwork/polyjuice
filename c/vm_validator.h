@@ -418,6 +418,8 @@ int contract_info_process_calls(contract_info *dest_info,
       return -99;
     }
     if (call.program_index != info->program_index) {
+      debug_print_int("call.program_index", call.program_index);
+      debug_print_int("info->program_index", info->program_index);
       ckb_debug("program_index not match");
       return -99;
     }
@@ -722,6 +724,7 @@ struct evmc_result call(struct evmc_host_context* context,
     }
     sender_info->current_program = current_program;
     sender_info->program_index = current_index;
+    debug_print_int(">> run special program_index", current_index);
     res = vm->execute(vm, context->interface, context, EVMC_MAX_REVISION, msg, dest_info->code_data, dest_info->code_size);
     /* Verify return data */
     if (sender_info->current_program->return_data_size != res.output_size) {
