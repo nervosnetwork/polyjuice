@@ -14,8 +14,6 @@ That is also just our claim, as engineers we all know the famous quote "Talk is 
 
 Polyjuice use [evmone](https://github.com/ethereum/evmone) as the EVM implementation in both `generator` and `validator`, almost all opcodes are supported except:
 
-* `CREATE2` (will be supported)
-* `DELEGATECALL` (will be supported)
 * `COINBASE`  (will be supported)
 
 # A short tutorial

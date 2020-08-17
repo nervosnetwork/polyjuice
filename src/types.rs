@@ -191,7 +191,7 @@ pub struct EoaAddress(pub H160);
 
 /// The contract account address.
 /// Use `type_id` logic to ensure it's uniqueness.
-/// Please see: https://github.com/nervosnetwork/ckb/blob/v0.31.1/script/src/type_id.rs
+/// Please see: https://github.com/nervosnetwork/ckb/blob/01eb5b2ecadf7e421b117d6c013e182978746e2f/script/src/type_id.rs
 ///
 ///     data_1  = first_input.as_slice();
 ///     data_2  = first_output_index_in_current_group.to_le_bytes()
