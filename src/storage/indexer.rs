@@ -3,7 +3,7 @@ use ckb_jsonrpc_types::{JsonBytes, ScriptHashType};
 use ckb_simple_account_layer::{run_with_context, CkbBlake2bHasher, Config, RunContext, RunResult};
 use ckb_types::{
     bytes::{BufMut, Bytes, BytesMut},
-    core, packed,
+    core, h256, packed,
     prelude::*,
     H160, H256, U256,
 };
@@ -383,10 +383,10 @@ impl Indexer {
                 }
 
                 if let Some(tip_block_hash) = tx.header_deps.get(0) {
-                    let tip_header = self
+                    let tip_block = self
                         .client
-                        .get_header(tip_block_hash.clone())?
-                        .map(core::HeaderView::from)
+                        .get_block(tip_block_hash.clone())?
+                        .map(core::BlockView::from)
                         .expect("block not exists");
                     let mut header_deps = HashMap::default();
                     for block_hash in tx.header_deps {
@@ -399,7 +399,7 @@ impl Indexer {
                     }
                     if let Some(mut extractor) = ContractExtractor::init(
                         self.run_config.clone(),
-                        tip_header,
+                        tip_block,
                         header_deps,
                         tx_hash,
                         tx_index as u32,
@@ -534,7 +534,7 @@ impl Indexer {
 //   3. produce SELFDESTRUCT contracts
 pub struct ContractExtractor {
     run_config: RunConfig,
-    tip_header: core::HeaderView,
+    tip_block: core::BlockView,
     header_deps: HashMap<u64, core::HeaderView>,
     tx_hash: H256,
     tx_index: u32,
@@ -658,7 +658,7 @@ impl ContractInfo {
 impl ContractExtractor {
     pub fn init(
         run_config: RunConfig,
-        tip_header: core::HeaderView,
+        tip_block: core::BlockView,
         header_deps: HashMap<u64, core::HeaderView>,
         tx_hash: H256,
         tx_index: u32,
@@ -717,7 +717,7 @@ impl ContractExtractor {
             let current_contract = entrance_contract.clone();
             ContractExtractor {
                 run_config,
-                tip_header,
+                tip_block,
                 header_deps,
                 tx_hash,
                 tx_index,
@@ -1040,17 +1040,38 @@ impl<Mac: SupportMachine> RunContext<Mac> for ContractExtractor {
             // evmc_tx_context {block_number, block_timestamp, difficulty, chain_id}
             3082 => {
                 let buffer_ptr = machine.registers()[A0].to_u64();
-                let mut data = [0u8; 8 + 8 + 32 + 32];
-                let number = self.tip_header.number();
-                let timestamp = self.tip_header.timestamp() / 1000;
-                let difficulty = self.tip_header.difficulty();
+                let mut data = [0u8; 8 + 8 + 32 + 20 + 32];
+                let number = self.tip_block.number();
+                let timestamp = self.tip_block.timestamp() / 1000;
+                let difficulty = self.tip_block.difficulty();
                 // TODO: config chain ID
                 let chain_id = U256::one();
+                // FIXME: only recognize secp_blake160 for now
+                let cellbase_lock = self
+                    .tip_block
+                    .transaction(0)
+                    .expect("Cellbase must exists")
+                    .output(0)
+                    .expect("No output in cellbase")
+                    .lock();
+                let secp_blake160_code_hash: packed::Byte32 =
+                    h256!("0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8")
+                        .pack();
+                let coinbase_opt = if cellbase_lock.hash_type() == core::ScriptHashType::Type.into()
+                    && cellbase_lock.code_hash() == secp_blake160_code_hash
+                {
+                    H160::from_slice(cellbase_lock.args().raw_data().as_ref()).ok()
+                } else {
+                    None
+                };
+                let coinbase = coinbase_opt.unwrap_or_default();
+
                 log::debug!("number: {}, timestamp: {}", number, timestamp);
                 data[0..8].copy_from_slice(&number.to_le_bytes());
                 data[8..16].copy_from_slice(&timestamp.to_le_bytes());
                 data[16..48].copy_from_slice(&difficulty.to_be_bytes());
-                data[48..80].copy_from_slice(&chain_id.to_be_bytes());
+                data[48..68].copy_from_slice(coinbase.as_bytes());
+                data[68..100].copy_from_slice(&chain_id.to_be_bytes());
                 machine.memory_mut().store_bytes(buffer_ptr, &data[..])?;
                 machine.set_register(A0, Mac::REG::from_u8(0));
                 Ok(true)

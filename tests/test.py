@@ -60,8 +60,8 @@ contracts_binary = {
     DELEGATECALL: open(os.path.join(evm_contracts_dir, 'DelegateCall.bin'), 'r').read().strip(),
 }
 
-def addr_to_arg(addr):
-    return "000000000000000000000000{}".format(addr[2:])
+def addr_to_arg(addr, prefix=''):
+    return "{}000000000000000000000000{}".format(prefix, addr[2:])
 
 def to_uint(number):
     output = hex(number)[2:]
@@ -309,12 +309,15 @@ def test_call_selfdestruct():
 def test_get_block_info():
     contract_name = BLOCK_INFO
     print("[Start]: {}\n".format(contract_name))
+    # Skip cellbases without output
+    mine_blocks(n=12)
     contract_address = create_contract_by_name(contract_name)
 
     functions = {
         'getDifficulty': '0xb6baffe3',
         'getNumber': '0xf2c9ecd8',
         'getTimestamp': '0x188ec356',
+        'getCoinbase': '0xd1a82a9d',
     }
 
     result = call_contract(contract_address, functions['getDifficulty'], is_static=True)
@@ -331,6 +334,10 @@ def test_get_block_info():
     assert result['return_data'] > '0x000000000000000000000000000000000000000000000000000000005f2b964a'
     # 2120.9.30
     assert result['return_data'] < '0x000000000000000000000000000000000000000000000000000000011b8b1c00'
+
+    result = call_contract(contract_address, functions['getCoinbase'], is_static=True)
+    print('getCoinbase() => {}'.format(result['return_data']))
+    assert result['return_data'] == addr_to_arg(SENDER1, prefix='0x')
 
     print("[Finish]: {}\n".format(contract_name))
 

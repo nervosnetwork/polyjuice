@@ -14,3 +14,6 @@
 [submodule "c/deps/intx"]
 	path = c/deps/intx
 	url = https://github.com/chfast/intx
+[submodule "c/deps/merkle-tree"]
+	path = c/deps/merkle-tree
+	url = https://github.com/TheWaWaR/merkle-tree-c.git

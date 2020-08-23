@@ -85,6 +85,8 @@ struct evmc_tx_context get_tx_context(struct evmc_host_context* context) {
   ctx.block_timestamp = (int64_t)block_timestamp;
   memcpy(ctx.block_difficulty.bytes, ctx_ptr, 32);
   ctx_ptr += 32;
+  memcpy(ctx.block_coinbase.bytes, ctx_ptr, 20);
+  ctx_ptr += 20;
   memcpy(ctx.chain_id.bytes, ctx_ptr, 32);
   ctx_ptr += 32;
   /* int64_t::MAX */

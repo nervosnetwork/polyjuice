@@ -4,9 +4,11 @@ use ckb_simple_account_layer::{
 };
 use ckb_types::{
     bytes::{BufMut, Bytes, BytesMut},
-    core::{HeaderView, ScriptHashType, TransactionBuilder},
+    core::{BlockView, ScriptHashType, TransactionBuilder},
+    h256,
     packed::{
-        BytesOpt, CellInput, CellOutput, OutPoint, Script, ScriptOpt, Transaction, WitnessArgs,
+        Byte32, BytesOpt, CellInput, CellOutput, OutPoint, Script, ScriptOpt, Transaction,
+        WitnessArgs,
     },
     prelude::*,
     H160, H256, U256,
@@ -23,9 +25,9 @@ use std::error::Error as StdError;
 use super::Loader;
 use crate::types::{
     h256_to_smth256, parse_log, smth256_to_h256, vm_load_data, vm_load_h160, vm_load_h256,
-    vm_load_i32, vm_load_i64, vm_load_u32, vm_load_u8, CallKind, ContractAddress, ContractCell,
-    EoaAddress, Program, RunConfig, WitnessData, ALWAYS_SUCCESS_SCRIPT, MIN_CELL_CAPACITY, ONE_CKB,
-    SIGHASH_CELL_DEP, SIGHASH_TYPE_HASH,
+    vm_load_i32, vm_load_i64, vm_load_u32, vm_load_u8, CallKind, Coinbase, ContractAddress,
+    ContractCell, EoaAddress, Program, RunConfig, WitnessData, ALWAYS_SUCCESS_SCRIPT,
+    MIN_CELL_CAPACITY, ONE_CKB, SIGHASH_CELL_DEP, SIGHASH_TYPE_HASH,
 };
 
 pub struct Runner {
@@ -57,9 +59,9 @@ impl Runner {
             false,
         );
 
-        let tip_header = self.loader.load_header(None)?;
+        let tip_block = self.loader.load_block(None)?;
         let mut context =
-            CsalRunContext::new(self.loader.clone(), self.run_config.clone(), tip_header);
+            CsalRunContext::new(self.loader.clone(), self.run_config.clone(), tip_block);
         if let Err(err) = context.run(program) {
             log::warn!("Error: {:?}", err);
             return Err(err);
@@ -87,9 +89,9 @@ impl Runner {
             false,
         );
 
-        let tip_header = self.loader.load_header(None)?;
+        let tip_block = self.loader.load_block(None)?;
         let mut context =
-            CsalRunContext::new(self.loader.clone(), self.run_config.clone(), tip_header);
+            CsalRunContext::new(self.loader.clone(), self.run_config.clone(), tip_block);
         if let Err(err) = context.run(program) {
             log::warn!("Error: {:?}", err);
             return Err(err);
@@ -103,9 +105,9 @@ impl Runner {
         code: Bytes,
     ) -> Result<CsalRunContext, Box<dyn StdError>> {
         let program = Program::new_create(EoaAddress(sender.clone()), sender, code);
-        let tip_header = self.loader.load_header(None)?;
+        let tip_block = self.loader.load_block(None)?;
         let mut context =
-            CsalRunContext::new(self.loader.clone(), self.run_config.clone(), tip_header);
+            CsalRunContext::new(self.loader.clone(), self.run_config.clone(), tip_block);
         if let Err(err) = context.run(program) {
             log::warn!("Error: {:?}", err);
             return Err(err);
@@ -175,7 +177,7 @@ impl ExecuteRecord {
         }
     }
 
-    pub fn witness_data(&self, first_program: bool) -> WitnessData {
+    pub fn witness_data(&self, first_program: bool, block_opt: Option<&BlockView>) -> WitnessData {
         // This optmize is for reducing witness size by remove duplicated code field
         let mut program = self.program.clone();
         if !first_program {
@@ -185,11 +187,17 @@ impl ExecuteRecord {
             log::debug!("[call]: ({:x}, {})", dest.0, program_index);
         }
         log::debug!("[run_proof]: {}", hex::encode(&self.run_proof));
+        let coinbase = if first_program {
+            block_opt.map(Coinbase::new)
+        } else {
+            None
+        };
         WitnessData {
             signature: Bytes::from(vec![0u8; 65]),
             program,
             return_data: self.return_data.clone(),
             selfdestruct: None,
+            coinbase,
             calls: self.calls.clone(),
             run_proof: self.run_proof.clone(),
         }
@@ -256,12 +264,12 @@ impl ContractInfo {
     }
 
     // Serialize all call records to WitnessArgs
-    pub fn witness_data(&self) -> WitnessArgs {
+    pub fn witness_data(&self, block_opt: Option<&BlockView>) -> WitnessArgs {
         let mut witness_data_vec: Vec<WitnessData> = self
             .execute_records
             .iter()
             .enumerate()
-            .map(|(idx, record)| record.witness_data(idx == 0))
+            .map(|(idx, record)| record.witness_data(idx == 0, block_opt))
             .collect();
         witness_data_vec[self.execute_records.len() - 1].selfdestruct = self
             .selfdestruct
@@ -329,7 +337,7 @@ impl ContractInfo {
 pub struct CsalRunContext {
     pub loader: Loader,
     pub run_config: RunConfig,
-    pub tip_header: HeaderView,
+    pub tip_block: BlockView,
     // Save header deps for get_block_hash
     pub header_deps: HashSet<H256>,
     // The transaction origin address
@@ -347,11 +355,11 @@ pub struct CsalRunContext {
 }
 
 impl CsalRunContext {
-    pub fn new(loader: Loader, run_config: RunConfig, tip_header: HeaderView) -> CsalRunContext {
+    pub fn new(loader: Loader, run_config: RunConfig, tip_block: BlockView) -> CsalRunContext {
         CsalRunContext {
             loader,
             run_config,
-            tip_header,
+            tip_block,
             header_deps: HashSet::default(),
             tx_origin: Default::default(),
             first_fuel_input: None,
@@ -494,17 +502,17 @@ impl CsalRunContext {
             outputs_data.push(Bytes::default());
         }
 
-        let tip_header_hash: H256 = self.tip_header.hash().unpack();
+        let tip_hash: H256 = self.tip_block.hash().unpack();
         let mut header_deps = self
             .loader
             .load_header_deps(&inputs)?
             .into_iter()
             .chain(self.header_deps.clone())
-            .filter(|hash| hash != &tip_header_hash)
+            .filter(|hash| hash != &tip_hash)
             .collect::<HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        header_deps.insert(0, tip_header_hash);
+        header_deps.insert(0, tip_hash);
 
         // Collect witnesses, and give them correct positions
         let mut input_index = if self.first_fuel_input.is_some() {
@@ -514,10 +522,17 @@ impl CsalRunContext {
         };
         let mut witnesses_data = vec![(None, None); self.contracts.len()];
         for (output_index, (_, info)) in self.contracts.iter().enumerate() {
-            if info.is_create() {
-                witnesses_data[output_index].1 = Some(info.witness_data());
+            // entrance contract
+            let block_opt = if output_index == 0 {
+                Some(&self.tip_block)
             } else {
-                witnesses_data[input_index].0 = Some(info.witness_data());
+                None
+            };
+            let witness_data = info.witness_data(block_opt);
+            if info.is_create() {
+                witnesses_data[output_index].1 = Some(witness_data);
+            } else {
+                witnesses_data[input_index].0 = Some(witness_data);
                 input_index += 1;
             }
         }
@@ -1091,20 +1106,42 @@ impl<Mac: SupportMachine> RunContext<Mac> for CsalRunContext {
                 self.header_deps.insert(block_hash);
                 Ok(true)
             }
-            // evmc_tx_context {block_number, block_timestamp, difficulty, chain_id}
+            // evmc_tx_context {block_number, block_timestamp, difficulty, coinbase, chain_id}
             3082 => {
                 let buffer_ptr = machine.registers()[A0].to_u64();
-                let mut data = [0u8; 8 + 8 + 32 + 32];
-                let number = self.tip_header.number();
-                let timestamp = self.tip_header.timestamp() / 1000;
-                let difficulty = self.tip_header.difficulty();
+                let mut data = [0u8; 8 + 8 + 32 + 20 + 32];
+                let number = self.tip_block.number();
+                let timestamp = self.tip_block.timestamp() / 1000;
+                let difficulty = self.tip_block.difficulty();
                 // TODO: config chain ID
                 let chain_id = U256::one();
+                let secp_blake160_code_hash: Byte32 =
+                    h256!("0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8")
+                        .pack();
+                // FIXME: only recognize secp_blake160 lock args for now
+                let coinbase_opt = self
+                    .tip_block
+                    .transaction(0)
+                    .expect("Cellbase must exists")
+                    .output(0)
+                    .map(|output| output.lock())
+                    .and_then(|cellbase_lock| {
+                        if cellbase_lock.hash_type() == ScriptHashType::Type.into()
+                            && cellbase_lock.code_hash() == secp_blake160_code_hash
+                        {
+                            H160::from_slice(cellbase_lock.args().raw_data().as_ref()).ok()
+                        } else {
+                            None
+                        }
+                    });
+                let coinbase = coinbase_opt.unwrap_or_default();
+
                 log::debug!("number: {}, timestamp: {}", number, timestamp);
                 data[0..8].copy_from_slice(&number.to_le_bytes());
                 data[8..16].copy_from_slice(&timestamp.to_le_bytes());
                 data[16..48].copy_from_slice(&difficulty.to_be_bytes());
-                data[48..80].copy_from_slice(&chain_id.to_be_bytes());
+                data[48..68].copy_from_slice(coinbase.as_bytes());
+                data[68..100].copy_from_slice(&chain_id.to_be_bytes());
                 machine.memory_mut().store_bytes(buffer_ptr, &data[..])?;
                 machine.set_register(A0, Mac::REG::from_u8(0));
                 Ok(true)

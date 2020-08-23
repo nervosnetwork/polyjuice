@@ -1,5 +1,6 @@
 #include <evmc/evmc.h>
 #include <intx/intx.hpp>
+#include <merkle_tree.h>
 
 #define CSAL_VALIDATOR_TYPE 1
 #include "validator.h"
@@ -78,6 +79,18 @@ evmc_uint256be compact_to_difficulty(uint32_t compact) {
   return ret;
 }
 
+cbmt_node node_merge(void *merge_ctx,
+                     cbmt_node *left,
+                     cbmt_node *right) {
+  cbmt_node ret;
+  blake2b_state *blake2b_ctx = (blake2b_state *)merge_ctx;
+  blake2b_init(blake2b_ctx, CBMT_NODE_SIZE);
+  blake2b_update(blake2b_ctx, left->bytes, CBMT_NODE_SIZE);
+  blake2b_update(blake2b_ctx, right->bytes, CBMT_NODE_SIZE);
+  blake2b_final(blake2b_ctx, ret.bytes, CBMT_NODE_SIZE);
+  return ret;
+}
+
 #define MAX_CONTRACT_COUNT 64
 #define MAX_HEADER_COUNT 128
 #define HEADER_SIZE 4096
@@ -86,6 +99,16 @@ typedef struct {
   evmc_address destination;
   size_t program_index;
 } call_record;
+
+typedef struct {
+  evmc_bytes32 witnesses_root;
+  evmc_bytes32 raw_transactions_root;
+  size_t proof_lemmas_count;
+  evmc_bytes32 *proof_lemmas;
+  uint32_t proof_index;
+  uint32_t raw_cellbase_tx_size;
+  uint8_t *raw_cellbase_tx;
+} tx_coinbase;
 
 typedef struct contract_program {
   size_t total_size;
@@ -106,10 +129,12 @@ typedef struct contract_program {
   /* Other data */
   size_t return_data_size;
   uint8_t *return_data;
+  /* selfdestruct target */
   evmc_address beneficiary;
   size_t calls_count;
   size_t call_index;
   call_record *calls;
+  tx_coinbase *coinbase;
   struct contract_program *next_program;
   struct contract_program *prev_program;
 } contract_program;
@@ -136,6 +161,8 @@ typedef struct {
   uint64_t number;
   /* block hash */
   evmc_bytes32 hash;
+  /* Transactions root hash */
+  evmc_bytes32 transactions_root;
 } header_info;
 
 static bool global_touched = false;
@@ -146,6 +173,7 @@ static bool global_current_is_main = false;
 static struct evmc_tx_context global_tx_context;
 static header_info global_header_infos[MAX_HEADER_COUNT];
 static size_t global_header_count = 0;
+static uint64_t global_max_block_number = 0;
 
 int call_record_load(call_record *record, const uint8_t *buf, const size_t buf_size) {
   if (buf_size < 24) {
@@ -158,6 +186,44 @@ int call_record_load(call_record *record, const uint8_t *buf, const size_t buf_s
   record->program_index = (size_t)index;
   debug_print_data("[call.destination]", record->destination.bytes, 20);
   debug_print_int("[call.program_index]", record->program_index);
+  return 0;
+}
+
+int tx_coinbase_load(tx_coinbase *coinbase, const uint8_t *buf, const size_t buf_size) {
+  size_t offset = 0;
+  const evmc_bytes32 witnesses_root = *(evmc_bytes32 *)(buf + offset);
+  offset += 32;
+  const evmc_bytes32 raw_transactions_root = *(evmc_bytes32 *)(buf + offset);
+  offset += 32;
+  const uint32_t proof_lemmas_count = *(uint32_t *)(buf + offset);
+  offset += 4;
+  evmc_bytes32 *proof_lemmas = (evmc_bytes32 *)malloc(sizeof(evmc_bytes32) * proof_lemmas_count);
+  for (size_t i = 0; i < proof_lemmas_count; i++) {
+    *(proof_lemmas + i) = *(evmc_bytes32 *)(buf + offset);
+    offset += 32;
+  }
+  const uint32_t proof_index = *(uint32_t *)(buf + offset);
+  offset += 4;
+  const uint32_t raw_cellbase_tx_size = *(uint32_t *)(buf + offset);
+  offset += 4;
+  uint8_t *raw_cellbase_tx = (uint8_t *)buf + offset;
+  offset += raw_cellbase_tx_size;
+  if (offset != buf_size) {
+    debug_print_int("proof_lemmas_count", proof_lemmas_count);
+    debug_print_int("raw_cellbase_tx_size", raw_cellbase_tx_size);
+    debug_print_int("offset", offset);
+    debug_print_int("buf_size", buf_size);
+    debug_print_int("tx_coinbase used size not match, delta", ((int)offset - (int)buf_size));
+    return -99;
+  }
+
+  coinbase->witnesses_root = witnesses_root;
+  coinbase->raw_transactions_root = raw_transactions_root;
+  coinbase->proof_lemmas_count = proof_lemmas_count;
+  coinbase->proof_lemmas = proof_lemmas;
+  coinbase->proof_index = proof_index;
+  coinbase->raw_cellbase_tx_size = raw_cellbase_tx_size;
+  coinbase->raw_cellbase_tx = raw_cellbase_tx;
   return 0;
 }
 
@@ -194,15 +260,6 @@ int contract_program_load(contract_program *program, const uint8_t *buf, const s
   const evmc_address beneficiary = *(evmc_address *)(return_data + return_data_size);
   const uint32_t calls_count = *(uint32_t *)(return_data + return_data_size + 20);
   const uint8_t *calls_base = return_data + return_data_size + 20 + 4;
-  const size_t source_total_size = calls_base - buf + calls_count * 24;
-  if (source_total_size > buf_size) {
-    ckb_debug("not enough data to parse program");
-    return -99;
-  }
-  if (source_size + 4 != source_total_size) {
-    ckb_debug("wrong source size");
-    return -99;
-  }
   size_t bytes_left = buf_size - (calls_base - buf);
   call_record *calls = (call_record *)malloc(calls_count * sizeof(call_record));
   int ret;
@@ -212,6 +269,26 @@ int contract_program_load(contract_program *program, const uint8_t *buf, const s
       return ret;
     }
     bytes_left -= 24;
+  }
+  const size_t calls_size = calls_count * 24;
+  const uint32_t coinbase_size = *(uint32_t *)(calls_base + calls_size);
+  tx_coinbase *coinbase = coinbase_size > 0 ? (tx_coinbase *)malloc(sizeof(tx_coinbase)) : NULL;
+  if (coinbase_size > 0) {
+    const uint8_t *coinbase_base = (uint8_t *)calls_base + calls_size + 4;
+    ret = tx_coinbase_load(coinbase, coinbase_base, coinbase_size);
+    if (ret != CKB_SUCCESS) {
+      return ret;
+    }
+  }
+
+  const size_t source_total_size = calls_base - buf + calls_size + 4 + coinbase_size;
+  if (source_total_size > buf_size) {
+    ckb_debug("not enough data to parse program");
+    return -99;
+  }
+  if (source_size + 4 != source_total_size) {
+    ckb_debug("wrong source size");
+    return -99;
   }
 
   /* parse run proof part */
@@ -249,6 +326,7 @@ int contract_program_load(contract_program *program, const uint8_t *buf, const s
   program->calls_count = calls_count;
   program->call_index = 0;
   program->calls = calls;
+  program->coinbase = coinbase;
   program->next_program = NULL;
   program->prev_program = NULL;
   return 0;
@@ -809,6 +887,550 @@ void emit_log(struct evmc_host_context* context,
   /* Do nothing */
 }
 
+int load_contract_infos() {
+  int ret;
+  uint64_t len;
+  /* Load current contract address */
+  uint8_t witness_buf[WITNESS_SIZE];
+  uint8_t script[SCRIPT_SIZE];
+  len = SCRIPT_SIZE;
+  ret = ckb_checked_load_script(script, &len, 0);
+  if (ret != CKB_SUCCESS) {
+    ckb_debug("load current script failed");
+    return ret;
+  }
+  size_t script_size = len;
+  mol_seg_t script_seg;
+  script_seg.ptr = (uint8_t *)script;
+  script_seg.size = script_size;
+  if (MolReader_Script_verify(&script_seg, false) != MOL_OK) {
+    return ERROR_INVALID_DATA;
+  }
+  mol_seg_t args_seg = MolReader_Script_get_args(&script_seg);
+  mol_seg_t args_bytes_seg = MolReader_Bytes_raw_bytes(&args_seg);
+  if (args_bytes_seg.size != CSAL_SCRIPT_ARGS_LEN) {
+    return ERROR_INVALID_DATA;
+  }
+  global_current_contract = *(evmc_address *)args_bytes_seg.ptr;
+  debug_print_data("current contract", global_current_contract.bytes, 20);
+
+  /* Load all contract witness in current transaction */
+  uint8_t type_script[SCRIPT_SIZE];
+  size_t input_index = 0;
+  while (1) {
+    if (global_info_count >= MAX_CONTRACT_COUNT) {
+      ckb_debug("too many contract in one transaction");
+      return -100;
+    }
+    len = SCRIPT_SIZE;
+    ret = ckb_load_cell_by_field(type_script, &len, 0, input_index, CKB_SOURCE_INPUT, CKB_CELL_FIELD_TYPE);
+    if (ret == CKB_INDEX_OUT_OF_BOUND) {
+      ckb_debug("load inputs finised");
+      break;
+    } else if (ret == CKB_ITEM_MISSING) {
+      debug_print_int("ignore input", input_index);
+      input_index += 1;
+      continue;
+    } else if (ret != CKB_SUCCESS) {
+      debug_print_int("load type script from input failed", input_index);
+      return ret;
+    }
+    debug_print_int("loaded input", input_index);
+    bool code_matched = false;
+    ret = check_script_code(script, script_size, type_script, len, &code_matched);
+    if (ret != CKB_SUCCESS) {
+      debug_print_int("check type script from input failed", input_index);
+      return ret;
+    }
+    if (code_matched) {
+      mol_seg_t script_seg;
+      script_seg.ptr = type_script;
+      script_seg.size = len;
+      mol_seg_t args_seg = MolReader_Script_get_args(&script_seg);
+      mol_seg_t args_bytes_seg = MolReader_Bytes_raw_bytes(&args_seg);
+      if (args_bytes_seg.size != CSAL_SCRIPT_ARGS_LEN) {
+        return ERROR_INVALID_DATA;
+      }
+      evmc_address tmp_addr = *(evmc_address *)args_bytes_seg.ptr;
+      debug_print_data("args_bytes_seg", args_bytes_seg.ptr, 20);
+      debug_print_data("tmp_addr", tmp_addr.bytes, 20);
+      len = WITNESS_SIZE;
+      ret = ckb_load_witness(witness_buf, &len, 0, input_index, CKB_SOURCE_INPUT);
+      if (ret != CKB_SUCCESS) {
+        debug_print_int("load witness from input failed", input_index);
+        return ret;
+      }
+      mol_seg_t witness_seg;
+      witness_seg.ptr = (uint8_t *)witness_buf;
+      witness_seg.size = len;
+      debug_print_int("load witness:", (int) witness_seg.size);
+      if (MolReader_WitnessArgs_verify(&witness_seg, false) != MOL_OK) {
+        return ERROR_INVALID_DATA;
+      }
+      mol_seg_t content_seg = MolReader_WitnessArgs_get_input_type(&witness_seg);
+      if (MolReader_BytesOpt_is_none(&content_seg)) {
+        return ERROR_INVALID_DATA;
+      }
+      mol_seg_t content_bytes_seg = MolReader_Bytes_raw_bytes(&content_seg);
+      debug_print_int("parse input contract info", input_index);
+      contract_info *info = global_info_list + global_info_count;
+      ret = contract_info_init(info, content_bytes_seg.ptr, content_bytes_seg.size, &tmp_addr);
+      if (ret != CKB_SUCCESS) {
+        return ret;
+      }
+      debug_print_data("info->address", info->address.bytes, 20);
+      ckb_debug("parse input contract info finished");
+      global_info_count += 1;
+    }
+    input_index += 1;
+  }
+
+  size_t output_index = 0;
+  while (1) {
+    if (global_info_count >= MAX_CONTRACT_COUNT) {
+      ckb_debug("too many contract in one transaction");
+      return -100;
+    }
+    len = SCRIPT_SIZE;
+    ret = ckb_load_cell_by_field(type_script, &len, 0, output_index, CKB_SOURCE_OUTPUT, CKB_CELL_FIELD_TYPE);
+    if (ret == CKB_INDEX_OUT_OF_BOUND) {
+      ckb_debug("load outputs finised");
+      break;
+    } else if (ret == CKB_ITEM_MISSING) {
+      debug_print_int("ignore output", output_index);
+      output_index += 1;
+      continue;
+    } else if (ret != CKB_SUCCESS) {
+      debug_print_int("load type script from output failed", output_index);
+      return ret;
+    }
+    debug_print_int("loaded output", output_index);
+    bool code_matched = false;
+    ret = check_script_code(script, script_size, type_script, len, &code_matched);
+    if (ret != CKB_SUCCESS) {
+      debug_print_int("checkout type script from output failed", output_index);
+      return ret;
+    }
+    if (code_matched) {
+      mol_seg_t script_seg;
+      script_seg.ptr = type_script;
+      script_seg.size = len;
+      mol_seg_t args_seg = MolReader_Script_get_args(&script_seg);
+      mol_seg_t args_bytes_seg = MolReader_Bytes_raw_bytes(&args_seg);
+      if (args_bytes_seg.size != CSAL_SCRIPT_ARGS_LEN) {
+        return ERROR_INVALID_DATA;
+      }
+      evmc_address tmp_addr = *(evmc_address *)args_bytes_seg.ptr;
+      debug_print_data("args_bytes_seg", args_bytes_seg.ptr, 20);
+      debug_print_data("tmp_addr", tmp_addr.bytes, 20);
+      bool has_input = false;
+      for (size_t info_idx = 0; info_idx < global_info_count; info_idx++) {
+        if (memcmp(global_info_list[info_idx].address.bytes, tmp_addr.bytes, 20) == 0) {
+          has_input = true;
+          break;
+        }
+      }
+      if (!has_input) {
+        len = WITNESS_SIZE;
+        ret = ckb_load_witness(witness_buf, &len, 0, output_index, CKB_SOURCE_OUTPUT);
+        if (ret != CKB_SUCCESS) {
+          debug_print_int("load witness from output failed", input_index);
+          return ret;
+        }
+        mol_seg_t witness_seg;
+        witness_seg.ptr = (uint8_t *)witness_buf;
+        witness_seg.size = len;
+        debug_print_int("load witness:", (int) witness_seg.size);
+        if (MolReader_WitnessArgs_verify(&witness_seg, false) != MOL_OK) {
+          return ERROR_INVALID_DATA;
+        }
+        mol_seg_t content_seg = MolReader_WitnessArgs_get_output_type(&witness_seg);
+        if (MolReader_BytesOpt_is_none(&content_seg)) {
+          return ERROR_INVALID_DATA;
+        }
+        mol_seg_t content_bytes_seg = MolReader_Bytes_raw_bytes(&content_seg);
+        debug_print_int("parse output contract info", output_index);
+        contract_info *info = global_info_list + global_info_count;
+        ret = contract_info_init(info, content_bytes_seg.ptr, content_bytes_seg.size, &tmp_addr);
+        if (ret != CKB_SUCCESS) {
+          return ret;
+        }
+        debug_print_data("info->address", info->address.bytes, 20);
+        ckb_debug("parse output contract info finished");
+        global_info_count += 1;
+      }
+    }
+    output_index += 1;
+  }
+
+  return 0;
+}
+
+int verify_signature_count() {
+  uint8_t zero_signature[65];
+  memset(zero_signature, 0, 65);
+  /* Verify:
+   *  - there is one and only one non-zero signature
+   */
+  bool has_entrance_signature = false;
+  for (size_t info_idx = 0; info_idx < global_info_count; info_idx++) {
+    contract_info *info = &global_info_list[info_idx];
+    contract_program *current_program = info->head_program;
+    debug_print_int("info_idx", info_idx);
+    debug_print_data("info->address", info->address.bytes, 20);
+    for (size_t program_idx = 0; program_idx < info->program_count; program_idx++) {
+      debug_print_int("program_idx", program_idx);
+      debug_print_data("current_program->signature", current_program->signature, 65);
+      if (memcmp(current_program->signature, zero_signature, 65) != 0) {
+        if (program_idx != 0) {
+          ckb_debug("main signature is not in first program");
+          return -100;
+        }
+        if ((info->program_count - info->special_call_total_count) != 1) {
+          ckb_debug("main contract only allow 1 normal(not CALLCODE/DELEGATECALL) program");
+          return -100;
+        }
+        if (has_entrance_signature) {
+          ckb_debug("has multiple entrance signature");
+          return -100;
+        }
+        if (memcmp(global_current_contract.bytes, info->address.bytes, 20) == 0) {
+          global_current_is_main = true;
+        }
+        info->is_main = true;
+        memcpy(global_tx_context.tx_origin.bytes, current_program->tx_origin.bytes, 20);
+        has_entrance_signature = true;
+      }
+      current_program = current_program->next_program;
+    }
+  }
+  if (!has_entrance_signature) {
+    ckb_debug("no entrance signature found");
+    return -100;
+  }
+  return 0;
+}
+
+int verify_contract_code(blake2b_state *blake2b_ctx,
+                         uint8_t call_kind,
+                         const evmc_address *destination,
+                         const uint32_t code_size,
+                         const uint8_t *code_data) {
+  /*
+   * - verify code_hash not changed
+   * - verify code_hash in data filed match the blake2b_h256(code_data)
+   */
+  int ret;
+  uint64_t len;
+  if (call_kind == EVMC_CALL
+      || (is_special_call(call_kind)
+          && memcmp(destination->bytes, global_current_contract.bytes, 20) == 0)) {
+    uint8_t code_hash[32];
+    blake2b_init(blake2b_ctx, 32);
+    blake2b_update(blake2b_ctx, code_data, code_size);
+    blake2b_final(blake2b_ctx, code_hash, 32);
+    debug_print_data("code: ", code_data, code_size);
+    debug_print_data("code_hash: ", code_hash, 32);
+
+    uint8_t hash[32];
+    len = 32;
+    ret = ckb_load_cell_data(hash, &len, 32, 0, CKB_SOURCE_GROUP_INPUT);
+    if (ret != CKB_SUCCESS) {
+      ckb_debug("load cell data from input failed");
+      return ret;
+    }
+    if (len != 32) {
+      return -100;
+    }
+    debug_print_data("input code hash: ", hash, 32);
+    if (memcmp(code_hash, hash, 32) != 0) {
+      return -101;
+    }
+
+    len = 32;
+    ret = ckb_load_cell_data(hash, &len, 32, 0, CKB_SOURCE_GROUP_OUTPUT);
+    if (ret == CKB_SUCCESS) {
+      ckb_debug("load cell data from output failed");
+      if (len != 32) {
+        return -102;
+      }
+      debug_print_data("output code hash: ", hash, 32);
+      if (memcmp(code_hash, hash, 32) != 0) {
+        return -103;
+      }
+    } else if (ret != CKB_INDEX_OUT_OF_BOUND) {
+      return ret;
+    }
+  }
+  return 0;
+}
+
+int load_headers(blake2b_state *blake2b_ctx) {
+  /* Load latest header information */
+  int ret;
+  uint64_t len;
+  uint8_t header_buffer[HEADER_SIZE];
+  size_t input_index = 0;
+  while(1) {
+    /* Load header by inputs */
+    len = HEADER_SIZE;
+    ret = ckb_load_header(header_buffer, &len, 0, input_index, CKB_SOURCE_INPUT);
+    if (ret == CKB_INDEX_OUT_OF_BOUND) {
+      ckb_debug("load input headers finised");
+      break;
+    } else if (ret != CKB_SUCCESS) {
+      return ret;
+    }
+    if (len > HEADER_SIZE) {
+      /* buffer not enough */
+      return -10;
+    }
+    mol_seg_t header_seg;
+    header_seg.ptr = (uint8_t *)header_buffer;
+    header_seg.size = len;
+    mol_seg_t raw_seg = MolReader_Header_get_raw(&header_seg);
+    mol_seg_t block_number_seg = MolReader_RawHeader_get_number(&raw_seg);
+    uint64_t block_number = *((uint64_t *)block_number_seg.ptr);
+    if (block_number > global_max_block_number) {
+      global_max_block_number = block_number;
+    }
+    input_index += 1;
+  }
+
+  uint64_t header_index = 0;
+  while(1) {
+    /* Load header by header dep */
+    len = HEADER_SIZE;
+    ret = ckb_load_header(header_buffer, &len, 0, header_index, CKB_SOURCE_HEADER_DEP);
+    if (ret == CKB_INDEX_OUT_OF_BOUND) {
+      ckb_debug("load all headers finised");
+      break;
+    } else if (ret != CKB_SUCCESS) {
+      return ret;
+    }
+    if (len > HEADER_SIZE) {
+      /* buffer not enough */
+      return -10;
+    }
+    mol_seg_t header_seg;
+    header_seg.ptr = (uint8_t *)header_buffer;
+    header_seg.size = len;
+    mol_seg_t raw_seg = MolReader_Header_get_raw(&header_seg);
+    mol_seg_t block_number_seg = MolReader_RawHeader_get_number(&raw_seg);
+    uint64_t block_number = *((uint64_t *)block_number_seg.ptr);
+    mol_seg_t txs_root_seg = MolReader_RawHeader_get_transactions_root(&raw_seg);
+    evmc_bytes32 txs_root = *((evmc_bytes32 *)txs_root_seg.ptr);
+
+    evmc_bytes32 block_hash{};
+    blake2b_init(blake2b_ctx, 32);
+    blake2b_update(blake2b_ctx, header_seg.ptr, header_seg.size);
+    blake2b_final(blake2b_ctx, block_hash.bytes, 32);
+    global_header_infos[header_index] = header_info{block_number, block_hash, txs_root};
+
+    header_index += 1;
+  }
+  global_header_count = header_index;
+
+  return 0;
+}
+
+int load_tx_context(blake2b_state *blake2b_ctx) {
+  int ret;
+  uint64_t len = HEADER_SIZE;
+  uint8_t header_buffer[HEADER_SIZE];
+  ret = ckb_load_header(header_buffer, &len, 0, 0, CKB_SOURCE_HEADER_DEP);
+  if (ret != CKB_SUCCESS) {
+    return ret;
+  }
+  if (len > HEADER_SIZE) {
+    /* buffer not enough */
+    return -10;
+  }
+
+  mol_seg_t header_seg;
+  header_seg.ptr = (uint8_t *)header_buffer;
+  header_seg.size = len;
+  mol_seg_t raw_seg = MolReader_Header_get_raw(&header_seg);
+  /* Timestamp */
+  mol_seg_t timestamp_seg = MolReader_RawHeader_get_timestamp(&raw_seg);
+  uint64_t timestamp = *((uint64_t *)timestamp_seg.ptr) / 1000;
+  /* Block Number */
+  mol_seg_t block_number_seg = MolReader_RawHeader_get_number(&raw_seg);
+  uint64_t block_number = *((uint64_t *)block_number_seg.ptr);
+  if (block_number < global_max_block_number) {
+    ckb_debug("First header too old");
+    return -11;
+  }
+  mol_seg_t compact_target_seg = MolReader_RawHeader_get_compact_target(&raw_seg);
+  uint32_t compact_target = *((uint32_t *)compact_target_seg.ptr);
+
+  /* gas_price = 0 */
+  memset(global_tx_context.tx_gas_price.bytes, 0, 20);
+  /* already exists */
+  global_tx_context.block_number = (int64_t)block_number;
+  global_tx_context.block_timestamp = (int64_t)timestamp;
+  /* int64_t::MAX */
+  global_tx_context.block_gas_limit = 9223372036854775807;
+  /* gas_price = 0 */
+  global_tx_context.tx_gas_price = evmc_uint256be{};
+  /* TODO block_coinbase */
+  /* convert from compact_target */
+  global_tx_context.block_difficulty = compact_to_difficulty(compact_target);
+  /* chain_id = 1 (mainnet) */
+  intx::uint256 chain_id = 1;
+  intx::be::store(global_tx_context.chain_id.bytes, chain_id);
+
+  debug_print_data("[block difficulty]", global_tx_context.block_difficulty.bytes, 32);
+
+  /* load coinbase:
+      - coinbase can only be found in entrance contract's first program
+   */
+  tx_coinbase *coinbase = NULL;
+  for (size_t i = 0; i < global_info_count; i++) {
+    contract_info *info = &global_info_list[i];
+    contract_program *program = info->head_program;
+    for (size_t j = 0; j < info->program_count; j++) {
+      if (info->is_main && j == 0) {
+        coinbase = program->coinbase;
+      } else if (program->coinbase != NULL){
+        ckb_debug("found coinbase in unexpected place");
+        debug_print_int("info index", i);
+        debug_print_int("program index", j);
+        return -11;
+      }
+      program = program->next_program;
+    }
+  }
+  if (coinbase == NULL) {
+    ckb_debug("No coinbase found");
+  }
+  /* Verify coinbase */
+  uint32_t proof_index_values[1];
+  cbmt_node needed_nodes[1];
+  cbmt_proof proof;
+  cbmt_indices proof_indices;
+  cbmt_node root;
+  cbmt_leaves needed_leaves;
+  proof_index_values[0] = coinbase->proof_index;
+  proof_indices.values = proof_index_values;
+  proof_indices.length = 1;
+  proof_indices.capacity = 1;
+  proof.lemmas_length = coinbase->proof_lemmas_count;
+  proof.lemmas = (cbmt_node *)coinbase->proof_lemmas;
+  proof.indices = proof_indices;
+
+  memcpy(root.bytes, coinbase->raw_transactions_root.bytes, CBMT_NODE_SIZE);
+
+  blake2b_init(blake2b_ctx, CBMT_NODE_SIZE);
+  blake2b_update(blake2b_ctx, coinbase->raw_cellbase_tx, coinbase->raw_cellbase_tx_size);
+  blake2b_final(blake2b_ctx, (&needed_nodes[0])->bytes, CBMT_NODE_SIZE);
+  cbmt_leaves_init(&needed_leaves, needed_nodes, 1);
+
+  cbmt_node nodes[8];
+  cbmt_node_pair pairs[8];
+  cbmt_buffer nodes_buffer;
+  cbmt_buffer pairs_buffer;
+  cbmt_buffer_init(&nodes_buffer, nodes, sizeof(nodes));
+  cbmt_buffer_init(&pairs_buffer, pairs, sizeof(pairs));
+  ret = cbmt_proof_verify(&proof, &root, &needed_leaves, node_merge, blake2b_ctx, nodes_buffer, pairs_buffer);
+  if (ret != CKB_SUCCESS) {
+    debug_print_int("coinbase proof verify failed", ret);
+    return ret;
+  }
+  cbmt_node nodes2[8];
+  cbmt_buffer nodes2_buffer;
+  cbmt_buffer_init(&nodes2_buffer, nodes2, sizeof(nodes));
+  cbmt_node txs_root;
+  cbmt_leaves leaves;
+  cbmt_node leaf_nodes[2];
+  memcpy((&leaf_nodes[0])->bytes, coinbase->raw_transactions_root.bytes, CBMT_NODE_SIZE);
+  memcpy((&leaf_nodes[1])->bytes, coinbase->witnesses_root.bytes, CBMT_NODE_SIZE);
+  debug_print_data("leaf_nodes[0]", leaf_nodes[0].bytes, 32);
+  debug_print_data("leaf_nodes[1]", leaf_nodes[1].bytes, 32);
+  cbmt_leaves_init(&leaves, leaf_nodes, 2);
+  ret = cbmt_build_merkle_root(&txs_root, &leaves, node_merge, blake2b_ctx, nodes2_buffer);
+  if (ret != 0) {
+    ckb_debug("build merkle root failed");
+    return ret;
+  }
+  mol_seg_t transactions_root = MolReader_RawHeader_get_transactions_root(&raw_seg);
+  if (memcmp(txs_root.bytes, transactions_root.ptr, 32) != 0) {
+    ckb_debug("transactions root not match");
+    debug_print_data("txs_root", txs_root.bytes, 32);
+    debug_print_data("transactions_root", transactions_root.ptr, 32);
+    return -11;
+  }
+
+  mol_seg_t raw_tx_seg;
+  raw_tx_seg.ptr = coinbase->raw_cellbase_tx;
+  raw_tx_seg.size = coinbase->raw_cellbase_tx_size;
+  ret = MolReader_RawTransaction_verify(&raw_tx_seg, false);
+  if (ret != 0) {
+    ckb_debug("The raw_cellbase_tx data is not a validate molecule RawTransaction");
+    return ret;
+  }
+  mol_seg_t inputs_seg = MolReader_RawTransaction_get_inputs(&raw_tx_seg);
+  mol_seg_t outputs_seg = MolReader_RawTransaction_get_outputs(&raw_tx_seg);
+  uint32_t inputs_length = MolReader_CellInputVec_length(&inputs_seg);
+  uint32_t outputs_length = MolReader_CellOutputVec_length(&outputs_seg);
+  if (inputs_length != 1 || outputs_length > 1) {
+    ckb_debug("Cellbase has only one input and less than 1 output");
+    return -11;
+  }
+  mol_seg_res_t first_input_res = MolReader_CellInputVec_get(&inputs_seg, 0);
+  uint8_t input_res_errno = *(uint8_t *)(&first_input_res);
+  if (input_res_errno != 0) {
+    debug_print_int("error when get first input", input_res_errno);
+    return input_res_errno;
+  }
+  mol_seg_t first_input_seg = first_input_res.seg;
+  mol_seg_t previous_outpoint_seg = MolReader_CellInput_get_previous_output(&first_input_seg);
+  mol_seg_t previous_tx_hash_seg = MolReader_OutPoint_get_tx_hash(&previous_outpoint_seg);
+  mol_seg_t previous_index_seg = MolReader_OutPoint_get_index(&previous_outpoint_seg);
+  uint32_t previous_index = *(uint32_t *)previous_index_seg.ptr;
+  evmc_bytes32 zero_hash;
+  memset(zero_hash.bytes, 0, 32);
+  if (memcmp(previous_tx_hash_seg.ptr, zero_hash.bytes, 32) != 0) {
+    debug_print_data("invalid cellbase input previous_outpoint tx_hash", previous_tx_hash_seg.ptr, 32);
+    return -11;
+  }
+  if (previous_index != UINT32_MAX) {
+    debug_print_int("Invalid cellbase input previous_outpoint index", previous_index);
+    return -11;
+  }
+
+  if (outputs_length == 1) {
+    mol_seg_res_t first_output_res = MolReader_CellOutputVec_get(&outputs_seg, 0);
+    uint8_t output_res_errno = *(uint8_t *)(&first_output_res);
+    if (output_res_errno != 0) {
+      debug_print_int("error when get first output", output_res_errno);
+      return output_res_errno;
+    }
+    mol_seg_t first_output_seg = first_output_res.seg;
+    mol_seg_t output_lock_seg = MolReader_CellOutput_get_lock(&first_output_seg);
+    mol_seg_t lock_code_hash_seg = MolReader_Script_get_code_hash(&output_lock_seg);
+    mol_seg_t lock_hash_type_seg = MolReader_Script_get_hash_type(&output_lock_seg);
+    mol_seg_t lock_args_seg = MolReader_Script_get_args(&output_lock_seg);
+    mol_seg_t lock_args_bytes_seg = MolReader_Bytes_raw_bytes(&lock_args_seg);
+    /* 0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8 */
+    static uint8_t secp_blake160_code_hash[32]
+      = {0x9b, 0xd7, 0xe0, 0x6f, 0x3e, 0xcf, 0x4b, 0xe0,
+         0xf2, 0xfc, 0xd2, 0x18, 0x8b, 0x23, 0xf1, 0xb9,
+         0xfc, 0xc8, 0x8e, 0x5d, 0x4b, 0x65, 0xa8, 0x63,
+         0x7b, 0x17, 0x72, 0x3b, 0xbd, 0xa3, 0xcc, 0xe8};
+    if (memcmp(secp_blake160_code_hash, lock_code_hash_seg.ptr, 32) != 0) {
+      debug_print_data("[note]: code_hash not match", lock_code_hash_seg.ptr, 32);
+    } else if (*lock_hash_type_seg.ptr != 1) {
+      debug_print_int("[note]: hash_type not match", *lock_hash_type_seg.ptr);
+    } else if (lock_args_bytes_seg.size != 20) {
+      debug_print_int("[note]: lock args length not match", lock_args_bytes_seg.size);
+    } else {
+      debug_print_data("tx_context.block_coinbase", lock_args_bytes_seg.ptr, 20);
+      memcpy(global_tx_context.block_coinbase.bytes, lock_args_bytes_seg.ptr, 20);
+    }
+  }
+  return 0;
+}
 
 inline int verify_params(const uint8_t *signature_data,
                          const uint8_t call_kind,
@@ -835,372 +1457,34 @@ inline int verify_params(const uint8_t *signature_data,
   uint64_t len;
   blake2b_state blake2b_ctx;
   uint8_t witness_buf[WITNESS_SIZE];
-  uint8_t zero_signature[65];
-  memset(zero_signature, 0, 65);
 
   if (!global_touched) {
     ckb_debug("initializing ...");
-    /* Load current contract address */
-    uint8_t script[SCRIPT_SIZE];
-    len = SCRIPT_SIZE;
-    ret = ckb_checked_load_script(script, &len, 0);
-    if (ret != CKB_SUCCESS) {
-      ckb_debug("load current script failed");
-      return ret;
-    }
-    size_t script_size = len;
-    mol_seg_t script_seg;
-    script_seg.ptr = (uint8_t *)script;
-    script_seg.size = script_size;
-    if (MolReader_Script_verify(&script_seg, false) != MOL_OK) {
-      return ERROR_INVALID_DATA;
-    }
-    mol_seg_t args_seg = MolReader_Script_get_args(&script_seg);
-    mol_seg_t args_bytes_seg = MolReader_Bytes_raw_bytes(&args_seg);
-    if (args_bytes_seg.size != CSAL_SCRIPT_ARGS_LEN) {
-      return ERROR_INVALID_DATA;
-    }
-    global_current_contract = *(evmc_address *)args_bytes_seg.ptr;
-    debug_print_data("current contract", global_current_contract.bytes, 20);
 
-    /* Load all contract witness in current transaction */
-    uint8_t type_script[SCRIPT_SIZE];
-    size_t input_index = 0;
-    while (1) {
-      if (global_info_count >= MAX_CONTRACT_COUNT) {
-        ckb_debug("too many contract in one transaction");
-        return -100;
-      }
-      len = SCRIPT_SIZE;
-      ret = ckb_load_cell_by_field(type_script, &len, 0, input_index, CKB_SOURCE_INPUT, CKB_CELL_FIELD_TYPE);
-      if (ret == CKB_INDEX_OUT_OF_BOUND) {
-        ckb_debug("load inputs finised");
-        break;
-      } else if (ret == CKB_ITEM_MISSING) {
-        debug_print_int("ignore input", input_index);
-        input_index += 1;
-        continue;
-      } else if (ret != CKB_SUCCESS) {
-        debug_print_int("load type script from input failed", input_index);
-        return ret;
-      }
-      debug_print_int("loaded input", input_index);
-      bool code_matched = false;
-      ret = check_script_code(script, script_size, type_script, len, &code_matched);
-      if (ret != CKB_SUCCESS) {
-        debug_print_int("check type script from input failed", input_index);
-        return ret;
-      }
-      if (code_matched) {
-        mol_seg_t script_seg;
-        script_seg.ptr = type_script;
-        script_seg.size = len;
-        mol_seg_t args_seg = MolReader_Script_get_args(&script_seg);
-        mol_seg_t args_bytes_seg = MolReader_Bytes_raw_bytes(&args_seg);
-        if (args_bytes_seg.size != CSAL_SCRIPT_ARGS_LEN) {
-          return ERROR_INVALID_DATA;
-        }
-        evmc_address tmp_addr = *(evmc_address *)args_bytes_seg.ptr;
-        debug_print_data("args_bytes_seg", args_bytes_seg.ptr, 20);
-        debug_print_data("tmp_addr", tmp_addr.bytes, 20);
-        len = WITNESS_SIZE;
-        ret = ckb_load_witness(witness_buf, &len, 0, input_index, CKB_SOURCE_INPUT);
-        if (ret != CKB_SUCCESS) {
-          debug_print_int("load witness from input failed", input_index);
-          return ret;
-        }
-        mol_seg_t witness_seg;
-        witness_seg.ptr = (uint8_t *)witness_buf;
-        witness_seg.size = len;
-        debug_print_int("load witness:", (int) witness_seg.size);
-        if (MolReader_WitnessArgs_verify(&witness_seg, false) != MOL_OK) {
-          return ERROR_INVALID_DATA;
-        }
-        mol_seg_t content_seg = MolReader_WitnessArgs_get_input_type(&witness_seg);
-        if (MolReader_BytesOpt_is_none(&content_seg)) {
-          return ERROR_INVALID_DATA;
-        }
-        mol_seg_t content_bytes_seg = MolReader_Bytes_raw_bytes(&content_seg);
-        debug_print_int("parse input contract info", input_index);
-        contract_info *info = global_info_list + global_info_count;
-        ret = contract_info_init(info, content_bytes_seg.ptr, content_bytes_seg.size, &tmp_addr);
-        if (ret != CKB_SUCCESS) {
-          return ret;
-        }
-        debug_print_data("info->address", info->address.bytes, 20);
-        ckb_debug("parse input contract info finished");
-        global_info_count += 1;
-      }
-      input_index += 1;
-    }
-
-    size_t output_index = 0;
-    while (1) {
-      if (global_info_count >= MAX_CONTRACT_COUNT) {
-        ckb_debug("too many contract in one transaction");
-        return -100;
-      }
-      len = SCRIPT_SIZE;
-      ret = ckb_load_cell_by_field(type_script, &len, 0, output_index, CKB_SOURCE_OUTPUT, CKB_CELL_FIELD_TYPE);
-      if (ret == CKB_INDEX_OUT_OF_BOUND) {
-        ckb_debug("load outputs finised");
-        break;
-      } else if (ret == CKB_ITEM_MISSING) {
-        debug_print_int("ignore output", output_index);
-        output_index += 1;
-        continue;
-      } else if (ret != CKB_SUCCESS) {
-        debug_print_int("load type script from output failed", output_index);
-        return ret;
-      }
-      debug_print_int("loaded output", output_index);
-      bool code_matched = false;
-      ret = check_script_code(script, script_size, type_script, len, &code_matched);
-      if (ret != CKB_SUCCESS) {
-        debug_print_int("checkout type script from output failed", output_index);
-        return ret;
-      }
-      if (code_matched) {
-        mol_seg_t script_seg;
-        script_seg.ptr = type_script;
-        script_seg.size = len;
-        mol_seg_t args_seg = MolReader_Script_get_args(&script_seg);
-        mol_seg_t args_bytes_seg = MolReader_Bytes_raw_bytes(&args_seg);
-        if (args_bytes_seg.size != CSAL_SCRIPT_ARGS_LEN) {
-          return ERROR_INVALID_DATA;
-        }
-        evmc_address tmp_addr = *(evmc_address *)args_bytes_seg.ptr;
-        debug_print_data("args_bytes_seg", args_bytes_seg.ptr, 20);
-        debug_print_data("tmp_addr", tmp_addr.bytes, 20);
-        bool has_input = false;
-        for (size_t info_idx = 0; info_idx < global_info_count; info_idx++) {
-          if (memcmp(global_info_list[info_idx].address.bytes, tmp_addr.bytes, 20) == 0) {
-            has_input = true;
-            break;
-          }
-        }
-        if (!has_input) {
-          len = WITNESS_SIZE;
-          ret = ckb_load_witness(witness_buf, &len, 0, output_index, CKB_SOURCE_OUTPUT);
-          if (ret != CKB_SUCCESS) {
-            debug_print_int("load witness from output failed", input_index);
-            return ret;
-          }
-          mol_seg_t witness_seg;
-          witness_seg.ptr = (uint8_t *)witness_buf;
-          witness_seg.size = len;
-          debug_print_int("load witness:", (int) witness_seg.size);
-          if (MolReader_WitnessArgs_verify(&witness_seg, false) != MOL_OK) {
-            return ERROR_INVALID_DATA;
-          }
-          mol_seg_t content_seg = MolReader_WitnessArgs_get_output_type(&witness_seg);
-          if (MolReader_BytesOpt_is_none(&content_seg)) {
-            return ERROR_INVALID_DATA;
-          }
-          mol_seg_t content_bytes_seg = MolReader_Bytes_raw_bytes(&content_seg);
-          debug_print_int("parse output contract info", output_index);
-          contract_info *info = global_info_list + global_info_count;
-          ret = contract_info_init(info, content_bytes_seg.ptr, content_bytes_seg.size, &tmp_addr);
-          if (ret != CKB_SUCCESS) {
-            return ret;
-          }
-          debug_print_data("info->address", info->address.bytes, 20);
-          ckb_debug("parse output contract info finished");
-          global_info_count += 1;
-        }
-      }
-      output_index += 1;
-    }
-
-    /* Verify:
-     *  - there is one and only one non-zero signature
-     */
-    bool has_entrance_signature = false;
-    for (size_t info_idx = 0; info_idx < global_info_count; info_idx++) {
-      contract_info *info = &global_info_list[info_idx];
-      contract_program *current_program = info->head_program;
-      debug_print_int("info_idx", info_idx);
-      debug_print_data("info->address", info->address.bytes, 20);
-      for (size_t program_idx = 0; program_idx < info->program_count; program_idx++) {
-        debug_print_int("program_idx", program_idx);
-        debug_print_data("current_program->signature", current_program->signature, 65);
-        if (memcmp(current_program->signature, zero_signature, 65) != 0) {
-          if (program_idx != 0) {
-            ckb_debug("main signature is not in first program");
-            return -100;
-          }
-          if ((info->program_count - info->special_call_total_count) != 1) {
-            ckb_debug("main contract only allow 1 normal(not CALLCODE/DELEGATECALL) program");
-            return -100;
-          }
-          if (has_entrance_signature) {
-            ckb_debug("has multiple entrance signature");
-            return -100;
-          }
-          if (memcmp(global_current_contract.bytes, info->address.bytes, 20) == 0) {
-            global_current_is_main = true;
-          }
-          info->is_main = true;
-          memcpy(global_tx_context.tx_origin.bytes, current_program->tx_origin.bytes, 20);
-          has_entrance_signature = true;
-        }
-        current_program = current_program->next_program;
-      }
-    }
-    if (!has_entrance_signature) {
-      ckb_debug("no entrance signature found");
-      return -100;
-    }
-
-    /*
-     * - verify code_hash not changed
-     * - verify code_hash in data filed match the blake2b_h256(code_data)
-     */
-    if (call_kind == EVMC_CALL
-        || (is_special_call(call_kind)
-            && memcmp(destination->bytes, global_current_contract.bytes, 20) == 0)) {
-      uint8_t code_hash[32];
-      blake2b_init(&blake2b_ctx, 32);
-      blake2b_update(&blake2b_ctx, code_data, code_size);
-      blake2b_final(&blake2b_ctx, code_hash, 32);
-      debug_print_data("code: ", code_data, code_size);
-      debug_print_data("code_hash: ", code_hash, 32);
-
-      uint8_t hash[32];
-      len = 32;
-      ret = ckb_load_cell_data(hash, &len, 32, 0, CKB_SOURCE_GROUP_INPUT);
-      if (ret != CKB_SUCCESS) {
-        ckb_debug("load cell data from input failed");
-        return ret;
-      }
-      if (len != 32) {
-        return -100;
-      }
-      debug_print_data("input code hash: ", hash, 32);
-      if (memcmp(code_hash, hash, 32) != 0) {
-        return -101;
-      }
-
-      len = 32;
-      ret = ckb_load_cell_data(hash, &len, 32, 0, CKB_SOURCE_GROUP_OUTPUT);
-      if (ret == CKB_SUCCESS) {
-        ckb_debug("load cell data from output failed");
-        if (len != 32) {
-          return -102;
-        }
-        debug_print_data("output code hash: ", hash, 32);
-        if (memcmp(code_hash, hash, 32) != 0) {
-          return -103;
-        }
-      } else if (ret != CKB_INDEX_OUT_OF_BOUND) {
-        return ret;
-      }
-    }
-
-    /* Load latest header information */
-    uint64_t max_number = 0;
-    uint8_t header_buffer[HEADER_SIZE];
-    input_index = 0;
-    while(1) {
-      len = HEADER_SIZE;
-      ret = ckb_load_header(header_buffer, &len, 0, input_index, CKB_SOURCE_INPUT);
-      if (ret == CKB_INDEX_OUT_OF_BOUND) {
-        ckb_debug("load input headers finised");
-        break;
-      } else if (ret != CKB_SUCCESS) {
-        return ret;
-      }
-      if (len > HEADER_SIZE) {
-        /* buffer not enough */
-        return -10;
-      }
-      mol_seg_t header_seg;
-      header_seg.ptr = (uint8_t *)header_buffer;
-      header_seg.size = len;
-      mol_seg_t raw_seg = MolReader_Header_get_raw(&header_seg);
-      mol_seg_t block_number_seg = MolReader_RawHeader_get_number(&raw_seg);
-      uint64_t block_number = *((uint64_t *)block_number_seg.ptr);
-      if (block_number > max_number) {
-        max_number = block_number;
-      }
-      input_index += 1;
-    }
-
-    uint64_t header_index = 0;
-    while(1) {
-      len = HEADER_SIZE;
-      ret = ckb_load_header(header_buffer, &len, 0, header_index, CKB_SOURCE_HEADER_DEP);
-      if (ret == CKB_INDEX_OUT_OF_BOUND) {
-        ckb_debug("load all headers finised");
-        break;
-      } else if (ret != CKB_SUCCESS) {
-        return ret;
-      }
-      if (len > HEADER_SIZE) {
-        /* buffer not enough */
-        return -10;
-      }
-      mol_seg_t header_seg;
-      header_seg.ptr = (uint8_t *)header_buffer;
-      header_seg.size = len;
-      mol_seg_t raw_seg = MolReader_Header_get_raw(&header_seg);
-      mol_seg_t block_number_seg = MolReader_RawHeader_get_number(&raw_seg);
-      uint64_t block_number = *((uint64_t *)block_number_seg.ptr);
-
-      evmc_bytes32 block_hash{};
-      blake2b_init(&blake2b_ctx, 32);
-      blake2b_update(&blake2b_ctx, header_seg.ptr, header_seg.size);
-      blake2b_final(&blake2b_ctx, block_hash.bytes, 32);
-      global_header_infos[header_index] = header_info{block_number, block_hash};
-
-      header_index += 1;
-    }
-    global_header_count = header_index;
-
-    len = HEADER_SIZE;
-    ret = ckb_load_header(header_buffer, &len, 0, 0, CKB_SOURCE_HEADER_DEP);
+    ret = load_contract_infos();
     if (ret != CKB_SUCCESS) {
       return ret;
     }
-    if (len > HEADER_SIZE) {
-      /* buffer not enough */
-      return -10;
+
+    ret = verify_signature_count();
+    if (ret != CKB_SUCCESS) {
+      return ret;
     }
 
-    mol_seg_t header_seg;
-    header_seg.ptr = (uint8_t *)header_buffer;
-    header_seg.size = len;
-    mol_seg_t raw_seg = MolReader_Header_get_raw(&header_seg);
-    /* Timestamp */
-    mol_seg_t timestamp_seg = MolReader_RawHeader_get_timestamp(&raw_seg);
-    uint64_t timestamp = *((uint64_t *)timestamp_seg.ptr) / 1000;
-    /* Block Number */
-    mol_seg_t block_number_seg = MolReader_RawHeader_get_number(&raw_seg);
-    uint64_t block_number = *((uint64_t *)block_number_seg.ptr);
-    if (block_number < max_number) {
-      ckb_debug("First header too old");
-      return -11;
+    ret = verify_contract_code(&blake2b_ctx, call_kind, destination, code_size, code_data);
+    if (ret != CKB_SUCCESS) {
+      return ret;
     }
-    mol_seg_t compact_target_seg = MolReader_RawHeader_get_compact_target(&raw_seg);
-    uint32_t compact_target = *((uint32_t *)compact_target_seg.ptr);
 
-    /* gas_price = 0 */
-    memset(global_tx_context.tx_gas_price.bytes, 0, 20);
-    /* already exists */
-    global_tx_context.block_number = (int64_t)block_number;
-    global_tx_context.block_timestamp = (int64_t)timestamp;
-    /* int64_t::MAX */
-    global_tx_context.block_gas_limit = 9223372036854775807;
-    /* gas_price = 0 */
-    global_tx_context.tx_gas_price = evmc_uint256be{};
-    /* TODO block_coinbase */
-    /* convert from compact_target */
-    global_tx_context.block_difficulty = compact_to_difficulty(compact_target);
-    /* chain_id = 1 (mainnet) */
-    intx::uint256 chain_id = 1;
-    intx::be::store(global_tx_context.chain_id.bytes, chain_id);
+    ret = load_headers(&blake2b_ctx);
+    if (ret != CKB_SUCCESS) {
+      return ret;
+    }
 
-    debug_print_data("[block difficulty]", global_tx_context.block_difficulty.bytes, 32);
+    ret = load_tx_context(&blake2b_ctx);
+    if (ret != CKB_SUCCESS) {
+      return ret;
+    }
   }
 
   /* Verify sender by signature field */

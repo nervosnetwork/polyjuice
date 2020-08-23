@@ -1,9 +1,10 @@
 use ckb_simple_account_layer::{CkbBlake2bHasher, Config};
 use ckb_types::{
     bytes::{BufMut, Bytes, BytesMut},
-    core::{DepType, EpochNumberWithFraction, ScriptHashType},
+    core::{BlockView, DepType, EpochNumberWithFraction, ScriptHashType},
     h256, packed,
     prelude::*,
+    utilities::{merkle_root, CBMT},
     H160, H256,
 };
 use ckb_vm::{Error as VMError, Memory, Register, SupportMachine};
@@ -105,8 +106,20 @@ pub struct WitnessData {
     /// For verify every contract have exact number of programs in specific
     /// positions
     pub calls: Vec<(ContractAddress, u32)>,
+    /// The data required to read and verify coinbase, only in entrance program
+    pub coinbase: Option<Coinbase>,
     /// Provide storage diff and diff proofs.
     pub run_proof: Bytes,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Coinbase {
+    pub witnesses_root: H256,
+    pub raw_transactions_root: H256,
+    pub proof_lemmas: Vec<H256>,
+    pub proof_index: u32,
+    // packed::RawTransaction.as_slice()
+    pub raw_cellbase_tx: Bytes,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Hash)]
@@ -282,6 +295,71 @@ impl CallKind {
     }
 }
 
+impl Coinbase {
+    pub fn new(block: &BlockView) -> Coinbase {
+        let witnesses_root: H256 = merkle_root(block.tx_witness_hashes()).unpack();
+        let raw_transactions_root: H256 = merkle_root(block.tx_hashes()).unpack();
+        let proof = CBMT::build_merkle_proof(block.tx_hashes(), &[0][..]).expect("generate proof");
+        let proof_index = proof.indices()[0];
+        let proof_lemmas = proof
+            .lemmas()
+            .iter()
+            .map(|bytes32| bytes32.unpack())
+            .collect::<Vec<_>>();
+        let raw_cellbase_tx = block
+            .transaction(0)
+            .expect("Cellbase must exists")
+            .data()
+            .raw()
+            .as_bytes();
+        Coinbase {
+            witnesses_root,
+            raw_transactions_root,
+            proof_lemmas,
+            proof_index,
+            raw_cellbase_tx,
+        }
+    }
+    pub fn load_from(data: &[u8]) -> Result<Coinbase, String> {
+        let mut offset = 0;
+        let witnesses_root = load_h256(data, &mut offset)?;
+        let raw_transactions_root = load_h256(data, &mut offset)?;
+        let lemmas_length = load_u32(data, &mut offset)?;
+        let mut proof_lemmas = Vec::new();
+        for _ in 0..lemmas_length {
+            proof_lemmas.push(load_h256(data, &mut offset)?);
+        }
+        let proof_index = load_u32(data, &mut offset)?;
+        let raw_cellbase_tx = Bytes::from(load_var_slice(data, &mut offset)?.to_vec());
+        if let Err(err) = packed::RawTransaction::from_slice(raw_cellbase_tx.as_ref()) {
+            return Err(format!(
+                "Parse raw cellbase transaction error: {}",
+                err.to_string()
+            ));
+        }
+        Ok(Coinbase {
+            witnesses_root,
+            raw_transactions_root,
+            proof_lemmas,
+            proof_index,
+            raw_cellbase_tx,
+        })
+    }
+    pub fn serialize(&self) -> Bytes {
+        let mut buf = BytesMut::default();
+        buf.put(self.witnesses_root.as_bytes());
+        buf.put(self.raw_transactions_root.as_bytes());
+        buf.put(&(self.proof_lemmas.len() as u32).to_le_bytes()[..]);
+        for lemma in &self.proof_lemmas {
+            buf.put(lemma.as_bytes());
+        }
+        buf.put(&self.proof_index.to_le_bytes()[..]);
+        buf.put(&(self.raw_cellbase_tx.len() as u32).to_le_bytes()[..]);
+        buf.put(self.raw_cellbase_tx.as_ref());
+        buf.freeze()
+    }
+}
+
 impl Program {
     pub fn new_create(tx_origin: EoaAddress, sender: H160, code: Bytes) -> Program {
         Program {
@@ -391,7 +469,7 @@ impl TryFrom<u8> for CallKind {
 impl WitnessData {
     pub fn load_from(data: &[u8]) -> Result<Option<(usize, WitnessData)>, String> {
         let mut offset = 0;
-        let (signature, program, return_data, selfdestruct, calls) = {
+        let (signature, program, return_data, selfdestruct, calls, coinbase) = {
             let program_data = load_var_slice(data, &mut offset)?;
             if program_data.is_empty() {
                 // The end of all programs (just like '\0' of C string)
@@ -419,12 +497,19 @@ impl WitnessData {
                 let program_index = load_u32(program_data, &mut inner_offset)?;
                 calls.push((ContractAddress(contract_address), program_index));
             }
+            let coinbase_bytes = load_var_slice(program_data, &mut inner_offset)?;
+            let coinbase = if !coinbase_bytes.is_empty() {
+                Some(Coinbase::load_from(coinbase_bytes)?)
+            } else {
+                None
+            };
             (
                 Bytes::from(signature[..].to_vec()),
                 program,
                 Bytes::from(return_data.to_vec()),
                 selfdestruct,
                 calls,
+                coinbase,
             )
         };
 
@@ -446,8 +531,9 @@ impl WitnessData {
             program,
             return_data,
             selfdestruct,
-            run_proof,
             calls,
+            coinbase,
+            run_proof,
         };
         Ok(Some((end, witness_data)))
     }
@@ -458,6 +544,7 @@ impl WitnessData {
             program,
             return_data: Bytes::default(),
             selfdestruct: None,
+            coinbase: None,
             run_proof: Bytes::default(),
             calls: Vec::new(),
         }
@@ -467,9 +554,6 @@ impl WitnessData {
     pub fn serialize(&self) -> Bytes {
         let mut buf = BytesMut::default();
         let program_data = self.program_data();
-        log::debug!(">> program_data.len() = {}", program_data.len());
-        log::debug!(">> program_data = {}", hex::encode(&program_data));
-        log::debug!(">> run_proof = {}", hex::encode(&self.run_proof));
         buf.put(&(program_data.len() as u32).to_le_bytes()[..]);
         buf.put(program_data.as_ref());
         buf.put(self.run_proof.as_ref());
@@ -496,6 +580,13 @@ impl WitnessData {
             buf.put(contract_address.0.as_bytes());
             buf.put(&program_index.to_le_bytes()[..]);
         }
+        let coinbase_bytes = self
+            .coinbase
+            .as_ref()
+            .map(|coinbase| coinbase.serialize())
+            .unwrap_or_default();
+        buf.put(&(coinbase_bytes.len() as u32).to_le_bytes()[..]);
+        buf.put(coinbase_bytes.as_ref());
         buf.freeze()
     }
 }
@@ -768,11 +859,12 @@ mod test {
             ),
             return_data: Bytes::from("return data"),
             selfdestruct: None,
-            run_proof: Bytes::from(run_proof_data),
             calls: vec![
                 (ContractAddress(h160!("0x33")), 0),
                 (ContractAddress(h160!("0x44")), 3),
             ],
+            coinbase: None,
+            run_proof: Bytes::from(run_proof_data),
         };
         let program_data = witness_data1.program_data();
         let binary = run_proof.serialize(&program_data).unwrap();

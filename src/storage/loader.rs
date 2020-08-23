@@ -2,7 +2,7 @@ use bincode::deserialize;
 use ckb_jsonrpc_types as json_types;
 use ckb_types::{
     bytes::Bytes,
-    core::{EpochNumberWithFraction, HeaderView, ScriptHashType},
+    core::{BlockView, EpochNumberWithFraction, HeaderView, ScriptHashType},
     packed,
     prelude::*,
     H256, U256,
@@ -379,6 +379,18 @@ impl Loader {
             self.client.get_tip_header()?
         };
         Ok(HeaderView::from(header))
+    }
+
+    pub fn load_block(&mut self, hash_opt: Option<H256>) -> Result<BlockView, String> {
+        let hash = if let Some(hash) = hash_opt {
+            hash
+        } else {
+            self.client.get_tip_header()?.hash
+        };
+        self.client
+            .get_block(hash.clone())?
+            .ok_or_else(|| format!("Block 0x{:x} not exists", hash))
+            .map(BlockView::from)
     }
 }
 

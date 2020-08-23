@@ -6,11 +6,12 @@ LD := $(TARGET)-gcc
 OBJCOPY := $(TARGET)-objcopy
 
 CFLAGS_CKB_STD = -Ideps/ckb-c-stdlib
+CFLAGS_CBMT := -isystem deps/merkle-tree
 CFLAGS_INTX := -Ideps/intx/lib/intx -Ideps/intx/include
 CFLAGS_ETHASH := -Ideps/ethash/include -Ideps/ethash/lib/ethash -Ideps/ethash/lib/keccak -Ideps/ethash/lib/support
 CFLAGS_EVMONE := -Ideps/evmone/lib/evmone -Ideps/evmone/include -Ideps/evmone/evmc/include
 CFLAGS_SECP := -isystem deps/secp256k1/src -isystem deps/secp256k1
-CFLAGS := -O3 $(CFLAGS_CKB_STD) $(CFLAGS_EVMONE) $(CFLAGS_INTX) $(CFLAGS_ETHASH) $(CFLAGS_SECP) -Wall -g
+CFLAGS := -O3 $(CFLAGS_CKB_STD) $(CFLAGS_CBMT) $(CFLAGS_EVMONE) $(CFLAGS_INTX) $(CFLAGS_ETHASH) $(CFLAGS_SECP) -Wall -g
 CXXFLAGS := $(CFLAGS) -std=c++1z
 LDFLAGS := -fdata-sections -ffunction-sections -Wl,--gc-sections
 SECP256K1_SRC := deps/secp256k1/src/ecmult_static_pre_context.h
