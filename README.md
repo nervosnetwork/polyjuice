@@ -9,12 +9,11 @@ That is also just our claim, as engineers we all know the famous quote "Talk is 
 - [x] Contract destruction
 - [x] Contract call contract
 - [x] Contract logs
-- [ ] Read block information from contract
+- [x] Read block information from contract
 - [ ] Value transfer
 
-Polyjuice use [evmone](https://github.com/ethereum/evmone) as the EVM implementation in both `generator` and `validator`, almost all opcodes are supported except:
+Polyjuice use [evmone](https://github.com/ethereum/evmone) as the EVM implementation in both `generator` and `validator`, all opcodes (if none is missing) are supported.
 
-* `COINBASE`  (will be supported)
 
 # A short tutorial
 
