@@ -82,13 +82,19 @@ int execute_vm(const uint8_t *source,
                           code_size, code_data, input_size, input_data);
 
 #ifdef CSAL_VALIDATOR_TYPE
+
+#ifndef NO_DEBUG_LOG
   debug_print_int("verify params", ret);
+#endif
+
   if (is_special_call(call_kind)) {
     /* Since the program already executed in `call` function, do nothing here */
     contract_info *info = NULL;
     find_contract_info(&info, global_info_list, global_info_count, &global_current_contract);
     if (info == NULL) {
+#ifndef NO_DEBUG_LOG
       ckb_debug("can not found contract info");
+#endif
       return -111;
     }
 
@@ -131,7 +137,9 @@ int execute_vm(const uint8_t *source,
   return_result(&msg, &res);
   ret = verify_result(&context, &msg, &res, return_data, return_data_size, &beneficiary);
 #ifdef CSAL_VALIDATOR_TYPE
+#ifndef NO_DEBUG_LOG
   debug_print_int("verify result", ret);
+#endif
 #endif
   if (ret != 0) {
     return ret;
@@ -143,7 +151,9 @@ int execute_vm(const uint8_t *source,
   }
 
 #ifdef CSAL_VALIDATOR_TYPE
+#ifndef NO_DEBUG_LOG
   debug_print_int("return status_code", res.status_code);
+#endif
 #endif
   return (int)res.status_code;
 }

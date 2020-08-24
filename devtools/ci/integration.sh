@@ -90,12 +90,12 @@ ckb-cli wallet transfer \
         --to-address ckt1qyqdfjzl8ju2vfwjtl4mttx6me09hayzfldq8m3a0y \
         --tx-fee 0.01 \
         --capacity 300000 \
-        --to-data-path ${PROJECT_ROOT}/c/build/validator \
+        --to-data-path ${PROJECT_ROOT}/c/build/validator_log \
     | cut -d ':' -f 2 \
     | xargs > ${VALIDATOR_TX_HASH_PATH}
 ${CKB_BIN} miner -C ${DEV_CHAIN_DIR} -l 4
 VALIDATOR_TX_HASH=$(cat ${VALIDATOR_TX_HASH_PATH})
-VALIDATOR_CODE_HASH=$(ckb-cli util blake2b --binary-path ${PROJECT_ROOT}/c/build/validator)
+VALIDATOR_CODE_HASH=$(ckb-cli util blake2b --binary-path ${PROJECT_ROOT}/c/build/validator_log)
 
 cat > ${INTEGRATION_ROOT}/run_config.json << _RUN_CONFIG_
 {

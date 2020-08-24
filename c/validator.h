@@ -66,9 +66,18 @@ int csal_change_fetch(csal_change_t *state, const uint8_t key[CSAL_KEY_BYTES],
                       uint8_t value[CSAL_VALUE_BYTES]);
 void csal_change_organize(csal_change_t *state);
 
-#ifdef DEBUG_VALIDATOR
+#ifdef NO_DEBUG_LOG
+#define debug_print(s)
+#define debug_print_int(prefix, value)
+#define debug_print_data(prefix, data, data_len)
+#else  /* #ifdef NO_DEBUG_LOG */
+#define debug_print(s)                            ckb_debug(s)
+#define debug_print_int(prefix, value)            debug_print_int_impl((prefix), (value))
+#define debug_print_data(prefix, data, data_len)  debug_print_data_impl((prefix), (data), (data_len))
+
+#ifdef LONG_DEBUG_LOG
 static char debug_buffer[64 * 1024];
-static void debug_print_data(const char *prefix,
+static void debug_print_data_impl(const char *prefix,
                              const uint8_t *data,
                              uint32_t data_len) {
   int offset = 0;
@@ -79,13 +88,13 @@ static void debug_print_data(const char *prefix,
   debug_buffer[offset] = '\0';
   ckb_debug(debug_buffer);
 }
-static void debug_print_int(const char *prefix, int ret) {
+static void debug_print_int_impl(const char *prefix, int ret) {
   sprintf(debug_buffer, "%s => %d", prefix, ret);
   ckb_debug(debug_buffer);
 }
-#else
+#else  /* #ifdef LONG_DEBUG_LOG */
 static char debug_buffer[1024];
-static void debug_print_data(const char *prefix, const uint8_t *data, uint32_t data_len) {
+static void debug_print_data_impl(const char *prefix, const uint8_t *data, uint32_t data_len) {
   if (strlen(prefix) + data_len * 2 + 3 > 120) {
     ckb_debug(prefix);
     ckb_debug("...... <data too long> ......");
@@ -99,11 +108,13 @@ static void debug_print_data(const char *prefix, const uint8_t *data, uint32_t d
     ckb_debug(debug_buffer);
   }
 }
-static void debug_print_int(const char *prefix, int ret) {
+static void debug_print_int_impl(const char *prefix, int ret) {
   sprintf(debug_buffer, "%s => %d", prefix, ret);
   ckb_debug(debug_buffer);
 }
-#endif
+#endif  /* #ifdef LONG_DEBUG_LOG */
+
+#endif  /* #ifdef NO_DEBUG_LOG */
 
 
 #ifndef CSAL_NO_IMPLEMENTATION
@@ -551,7 +562,7 @@ int main() {
 
   // Create
   if (input_index == -1 && output_index > -1) {
-    ckb_debug("create contract");
+    debug_print("create contract");
 
     uint8_t first_input[INPUT_SIZE];
     len = INPUT_SIZE;
@@ -715,7 +726,7 @@ int main() {
     csal_change_init(&write_changes, write_entries, MAXIMUM_WRITES);
     debug_print_int("csal_change_init(&write_changes);", 0);
 
-    ckb_debug("execute_vm() start");
+    debug_print("execute_vm() start");
     ret = execute_vm(source, source_length, &read_changes, &write_changes, &destructed);
     debug_print_int("execute_vm()", ret);
     if (ret != CKB_SUCCESS) {
@@ -728,10 +739,10 @@ int main() {
      * read values, we can reuse read_changes.
      */
     csal_change_init(&read_changes, read_entries, MAXIMUM_READS);
-    ckb_debug("csal_change_init(&read_changes, read_entries, MAXIMUM_READS) end");
+    debug_print("csal_change_init(&read_changes, read_entries, MAXIMUM_READS) end");
     uint32_t write_changes_len;
     ret = reader_uint32(&content_reader, &write_changes_len);
-    ckb_debug("reader_uint32(&content_reader, &write_changes_len) end");
+    debug_print("reader_uint32(&content_reader, &write_changes_len) end");
     if (ret != CKB_SUCCESS) {
       return ret;
     }
@@ -794,12 +805,12 @@ int main() {
   ret =
     ckb_load_cell_data(output_root_hash, &len, 0, 0, CKB_SOURCE_GROUP_OUTPUT);
   if (ret != CKB_INDEX_OUT_OF_BOUND && destructed) {
-    ckb_debug("destructed contract can not have output in the same group");
+    debug_print("destructed contract can not have output in the same group");
     return ERROR_DESTRUCT_WITH_OUTPUT;
   }
   if (ret == CKB_INDEX_OUT_OF_BOUND && destructed) {
     /* This is a special mode for destorying cells */
-    ckb_debug("contract destructed");
+    debug_print("contract destructed");
     return CKB_SUCCESS;
   }
   if (ret != CKB_SUCCESS) {
