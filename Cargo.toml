@@ -26,6 +26,7 @@ jsonrpc-derive = "14.0"
 jsonrpc-server-utils = "14.0"
 jsonrpc-http-server = "14.0"
 ckb-vm = { version = "0.19.1", features = ["asm"] }
+numext-fixed-uint = { version = "0.1", features = ["support_rand", "support_heapsize", "support_serde"] }
 sparse-merkle-tree = "0.3"
 ckb-hash = { git = "https://github.com/nervosnetwork/ckb", tag = "v0.31.0-pre1" }
 ckb-types = { git = "https://github.com/nervosnetwork/ckb", tag = "v0.31.0-pre1" }

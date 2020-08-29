@@ -23,9 +23,9 @@ use std::time::Duration;
 use super::{db_get, value, Key, Loader};
 use crate::client::HttpRpcClient;
 use crate::types::{
-    h256_to_smth256, parse_log, smth256_to_h256, vm_load_data, vm_load_h160, vm_load_h256,
-    vm_load_i32, vm_load_i64, vm_load_u32, vm_load_u8, CallKind, ContractAddress, ContractChange,
-    ContractMeta, EoaAddress, RunConfig, WitnessData,
+    account_balance, h256_to_smth256, parse_log, smth256_to_h256, vm_load_data, vm_load_h160,
+    vm_load_h256, vm_load_i32, vm_load_i64, vm_load_u32, vm_load_u8, CallKind, ContractAddress,
+    ContractChange, ContractMeta, EoaAddress, RunConfig, WitnessData,
 };
 
 pub const TYPE_ARGS_LEN: usize = 20;
@@ -291,6 +291,7 @@ impl Indexer {
                         let mut info = ContractInfo::default();
                         info.tree = change.merkle_tree();
                         info.input = Some((input_index, change));
+                        info.balance = info.init_balance();
                         script_groups.insert(address, info);
                     }
                     let out_point = packed::OutPoint::from(input.previous_output.clone());
@@ -558,6 +559,7 @@ pub struct ContractInfo {
     logs: Vec<(Vec<H256>, Bytes)>,
     pub run_result: RunResult,
     selfdestruct: Option<Bytes>,
+    balance: u128,
     // Updated by ckb-vm
     tree: SparseMerkleTree<CkbBlake2bHasher, SmtH256, DefaultStore<SmtH256>>,
 }
@@ -586,6 +588,12 @@ impl ContractInfo {
             self.programs[0].program.code.clone()
         }
     }
+    pub fn init_balance(&self) -> u128 {
+        self.input
+            .as_ref()
+            .map(|(_, change)| change.balance as u128)
+            .unwrap_or_default()
+    }
 
     pub fn current_call_index(&self) -> usize {
         self.call_indices[self.program_index]
@@ -608,11 +616,17 @@ impl ContractInfo {
     pub fn get_meta(&self, address: &ContractAddress, tx_hash: &H256) -> Option<ContractMeta> {
         if self.is_create() {
             let output_index = self.output.as_ref().map(|(index, _)| *index).unwrap() as u32;
+            let balance: u64 = self
+                .output
+                .as_ref()
+                .map(|(_, output)| account_balance(output))
+                .unwrap();
             Some(ContractMeta {
                 address: address.clone(),
                 code: self.code(),
                 tx_hash: tx_hash.clone(),
                 output_index,
+                balance: balance as u128,
                 destructed: false,
             })
         } else {
@@ -637,6 +651,7 @@ impl ContractInfo {
                 .collect();
             let tx_origin = self.programs[0].program.tx_origin.clone();
             let capacity: u64 = output.capacity().unpack();
+            let balance: u64 = account_balance(&output);
             Some(ContractChange {
                 tx_origin,
                 address: address.clone(),
@@ -647,6 +662,7 @@ impl ContractInfo {
                 new_storage,
                 logs: self.logs.clone(),
                 capacity,
+                balance,
                 is_create: self.is_create(),
             })
         } else {
@@ -1073,6 +1089,36 @@ impl<Mac: SupportMachine> RunContext<Mac> for ContractExtractor {
                 data[48..68].copy_from_slice(coinbase.as_bytes());
                 data[68..100].copy_from_slice(&chain_id.to_be_bytes());
                 machine.memory_mut().store_bytes(buffer_ptr, &data[..])?;
+                machine.set_register(A0, Mac::REG::from_u8(0));
+                Ok(true)
+            }
+
+            // evmc_uint256be get_balance
+            3083 => {
+                let address_ptr = machine.registers()[A0].to_u64();
+                let address: H160 = vm_load_h160(machine, address_ptr)?;
+                let balance_ptr = machine.registers()[A1].to_u64();
+                let info_address = ContractAddress(address.clone());
+                // FIXME:
+                //   [x] get balance from current related contract account
+                //   [x] get balance from current unrelated(unchanged) contract account
+                //   [ ] get balance from EoA account
+                let balance_u128: u128 = if let Some(info) = self.script_groups.get(&info_address) {
+                    // get balance from current related contract account
+                    info.balance
+                } else {
+                    // FIXME: get balance from EoA account
+                    0
+                };
+                log::debug!(
+                    "get_balance: address={:x}, balance={}",
+                    address,
+                    balance_u128
+                );
+                let balance = U256::from(balance_u128);
+                machine
+                    .memory_mut()
+                    .store_bytes(balance_ptr, &balance.to_be_bytes()[..])?;
                 machine.set_register(A0, Mac::REG::from_u8(0));
                 Ok(true)
             }

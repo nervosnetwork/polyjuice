@@ -196,6 +196,7 @@ inline int verify_params(const uint8_t *signature_data,
                          const evmc_address *tx_origin,
                          const evmc_address *sender,
                          const evmc_address *destination,
+                         const evmc_uint256be *value,
                          const uint32_t code_size,
                          const uint8_t *code_data,
                          const uint32_t input_size,
@@ -216,6 +217,11 @@ inline int verify_params(const uint8_t *signature_data,
   printf("destination: ");
   for (size_t i = 0; i < 20; i++) {
     printf("%02x", *(destination->bytes+i));
+  }
+  printf("\n");
+  printf("      value: ");
+  for (size_t i = 0; i < 32; i++) {
+    printf("%02x", *(value->bytes+i));
   }
   printf("\n");
   printf("input_size: %d\n", input_size);

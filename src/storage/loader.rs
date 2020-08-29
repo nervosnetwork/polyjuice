@@ -210,6 +210,7 @@ impl Loader {
                 tx_hash: value.tx_hash,
                 new_storage: value.new_storage.into_iter().collect(),
                 capacity: value.capacity,
+                balance: value.balance,
                 is_create: value.is_create,
                 number,
                 tx_index,
@@ -253,6 +254,7 @@ impl Loader {
                         code: meta.code,
                         tx_hash: meta.tx_hash,
                         output_index: meta.output_index,
+                        balance: meta.balance,
                         destructed: meta.destructed,
                     },
                 ));
@@ -269,6 +271,7 @@ impl Loader {
                 code: value.code,
                 tx_hash: value.tx_hash,
                 output_index: value.output_index,
+                balance: value.balance,
                 destructed: value.destructed,
             })
         } else {

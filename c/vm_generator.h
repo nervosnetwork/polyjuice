@@ -3,14 +3,15 @@
 #include "generator.h"
 #include <stdlib.h>
 
-#define _CSAL_RETURN_SYSCALL_NUMBER 3075
-#define _CSAL_LOG_SYSCALL_NUMBER 3076
-#define _CSAL_SELFDESTRUCT_SYSCALL_NUMBER 3077
-#define _CSAL_CALL_SYSCALL_NUMBER 3078
+#define _CSAL_RETURN_SYSCALL_NUMBER        3075
+#define _CSAL_LOG_SYSCALL_NUMBER           3076
+#define _CSAL_SELFDESTRUCT_SYSCALL_NUMBER  3077
+#define _CSAL_CALL_SYSCALL_NUMBER          3078
 #define _CSAL_GET_CODE_SIZE_SYSCALL_NUMBER 3079
-#define _CSAL_COPY_CODE_SYSCALL_NUMBER 3080
-#define _CSAL_GET_BLOCK_HASH 3081
-#define _CSAL_GET_TX_CONTEXT 3082
+#define _CSAL_COPY_CODE_SYSCALL_NUMBER     3080
+#define _CSAL_GET_BLOCK_HASH               3081
+#define _CSAL_GET_TX_CONTEXT               3082
+#define _CSAL_GET_BALANCE                  3083
 
 static char debug_buffer[64 * 1024];
 static void debug_print_data(const char *prefix,
@@ -53,6 +54,9 @@ int csal_get_block_hash(evmc_bytes32* block_hash, int64_t number) {
 int csal_get_tx_context(uint8_t *buffer) {
   return syscall(_CSAL_GET_TX_CONTEXT, buffer, 0, 0, 0, 0, 0);
 }
+int csal_get_balance(uint8_t *address, uint8_t *balance) {
+  return syscall(_CSAL_GET_BALANCE, address, balance, 0, 0, 0, 0);
+}
 
 
 void release_result(const struct evmc_result* result) {
@@ -91,6 +95,8 @@ struct evmc_tx_context get_tx_context(struct evmc_host_context* context) {
   ctx_ptr += 32;
   /* int64_t::MAX */
   ctx.block_gas_limit = 9223372036854775807;
+  /* gas_price = 1 wei */
+  ctx.tx_gas_price.bytes[31] = 0x01;
 
   debug_print_int("[block number]", block_number);
   debug_print_int("[block timestamp]", block_timestamp);
@@ -169,8 +175,13 @@ size_t copy_code(struct evmc_host_context* context,
 
 evmc_uint256be get_balance(struct evmc_host_context* context,
                            const evmc_address* address) {
-  // TODO: how to return balance?
+  debug_print_data("[get_balance]", address->bytes, 20);
   evmc_uint256be balance{};
+  int ret = csal_get_balance((uint8_t *)address->bytes, balance.bytes);
+  if (ret != 0) {
+    debug_print_int("[get_balance] Invalid return code", ret);
+  }
+  debug_print_data("[get_balance], value:", balance.bytes, 32);
   return balance;
 }
 
@@ -279,11 +290,21 @@ inline int verify_params(const uint8_t *signature_data,
                          const evmc_address *tx_origin,
                          const evmc_address *sender,
                          const evmc_address *destination,
+                         const evmc_uint256be *value,
                          const uint32_t code_size,
                          const uint8_t *code_data,
                          const uint32_t input_size,
                          const uint8_t *input_data) {
-  /* Do nothing */
+  debug_print_data("[verify_params] signature: ", signature_data, 65);
+  debug_print_int("[verify_params] kind : ", call_kind);
+  debug_print_int("[verify_params] flags: ", flags);
+  debug_print_int("[verify_params] depth: ", depth);
+  debug_print_data("[verify_params] tx_origin  : ", tx_origin->bytes, 20);
+  debug_print_data("[verify_params] sender     : ", sender->bytes, 20);
+  debug_print_data("[verify_params] destination: ", destination->bytes, 20);
+  debug_print_data("[verify_params] value      : ", value->bytes, 32);
+  debug_print_data("[verify_params] code : ", code_data, code_size);
+  debug_print_data("[verify_params] input: ", input_data, input_size);
   return 0;
 }
 

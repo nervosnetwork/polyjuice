@@ -181,6 +181,8 @@ fn main() -> Result<(), String> {
                 type_script: config_json.type_script.into(),
                 lock_dep: config_json.lock_dep.into(),
                 lock_script: config_json.lock_script.into(),
+                eoa_lock_dep: config_json.eoa_lock_dep.into(),
+                eoa_lock_script: config_json.eoa_lock_script.into(),
             };
             let ckb_uri = m.value_of("url").unwrap();
             let db_dir = m.value_of("db").unwrap();
@@ -415,6 +417,7 @@ fn main() -> Result<(), String> {
                 tx_origin: EoaAddress(sender.clone()),
                 sender,
                 destination,
+                value: 0,
                 code,
                 input,
             };
@@ -452,9 +455,12 @@ pub struct RunConfigJson {
     // Type script (Validator)
     pub type_dep: json_types::CellDep,
     pub type_script: json_types::Script,
-    // Lock script
+    // Lock script for contract (default always success)
     pub lock_dep: json_types::CellDep,
     pub lock_script: json_types::Script,
+    // Lock script for EoA account
+    pub eoa_lock_dep: json_types::CellDep,
+    pub eoa_lock_script: json_types::Script,
 }
 
 pub fn build_signature<S: FnMut(&H256) -> Result<[u8; 65], String>>(

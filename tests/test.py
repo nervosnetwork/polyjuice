@@ -45,6 +45,7 @@ CALL_MULTI = "CallMultipleTimes"
 CALL_SELFDESTRUCT = "CallSelfDestruct"
 BLOCK_INFO = "BlockInfo"
 DELEGATECALL = "DelegateCall"
+SIMPLE_TRANSFER = "SimpleTransfer"
 
 contracts_binary = {
     SIMPLE_STORAGE: open(os.path.join(evm_contracts_dir, 'SimpleStorage.bin'), 'r').read().strip(),
@@ -58,6 +59,7 @@ contracts_binary = {
     CALL_SELFDESTRUCT: open(os.path.join(evm_contracts_dir, 'CallSelfDestruct.bin'), 'r').read().strip(),
     BLOCK_INFO: open(os.path.join(evm_contracts_dir, 'BlockInfo.bin'), 'r').read().strip(),
     DELEGATECALL: open(os.path.join(evm_contracts_dir, 'DelegateCall.bin'), 'r').read().strip(),
+    SIMPLE_TRANSFER: open(os.path.join(evm_contracts_dir, 'SimpleTransfer.bin'), 'r').read().strip(),
 }
 
 def addr_to_arg(addr, prefix=''):
@@ -82,22 +84,27 @@ def send_jsonrpc(method, params):
         exit(-1)
     return resp["result"]
 
-def create_contract(binary, constructor_args="", sender=SENDER1):
+def create_contract(binary, constructor_args="", sender=SENDER1, value=0):
     print("[create contract]:")
     print("  sender = {}".format(sender))
     print("  binary = 0x{}".format(binary))
     print("    args = 0x{}".format(constructor_args))
-    result = send_jsonrpc("create", [sender, "0x{}{}".format(binary, constructor_args)])
+    print("   value = {}".format(value))
+    result = send_jsonrpc("create", [sender, "0x{}{}".format(binary, constructor_args), value])
     print("  >> created address = {}".format(result["entrance_contract"]))
     return result
 
-def call_contract(contract_address, args, is_static=False, sender=SENDER1):
+def call_contract(contract_address, args, is_static=False, sender=SENDER1, value=0):
     method = "static_call" if is_static else "call"
     print("[{} contract]:".format(method))
     print("   sender = {}".format(sender))
     print("  address = {}".format(contract_address))
     print("     args = {}".format(args))
-    return send_jsonrpc(method, [sender, contract_address, args])
+    print("    value = {}".format(value))
+    params = [sender, contract_address, args]
+    if not is_static:
+        params.append(value)
+    return send_jsonrpc(method, params)
 
 def run_cmd(cmd, print_output=True):
     print("[RUN]: {}".format(cmd))
@@ -129,8 +136,8 @@ def commit_tx(result, action_name, privkey_path=privkey1_path):
             break;
         print("Retry send transaction: {}".format(retry))
 
-def create_contract_by_name(name, constructor_args=""):
-    result = create_contract(contracts_binary[name], constructor_args)
+def create_contract_by_name(name, constructor_args="", value=0):
+    result = create_contract(contracts_binary[name], constructor_args, value=value)
     action_name = "create-{}".format(name)
     commit_tx(result, action_name)
     return result["entrance_contract"]
@@ -380,6 +387,20 @@ def test_delegatecall():
     #  2. call delegatecall then other action change current storage
     print("[Finish]: {}\n".format(contract_name))
 
+def test_simple_transfer():
+    contract_name = SIMPLE_TRANSFER
+    print("[Start]: {}\n".format(contract_name))
+    contract_address = create_contract_by_name(contract_name, value=3)
+
+    ss_address = create_contract_by_name(SIMPLE_STORAGE)
+    print("create SimpleStorage contract({}) for {}".format(ss_address, contract_name))
+    fn_transfer_to = "0xa03fa7e3"
+    args = fn_transfer_to + addr_to_arg(ss_address)
+    result = call_contract(contract_address, args)
+    action_name = "call-{}-{}-{}".format(contract_name, contract_address, args)
+    commit_tx(result, action_name)
+    print("[Finish]: {}\n".format(contract_name))
+
 def main():
     test_simple_storage()
     test_log_events()
@@ -392,6 +413,7 @@ def main():
     test_call_selfdestruct()
     test_get_block_info()
     test_delegatecall()
+    test_simple_transfer()
 
 if __name__ == "__main__":
     main()

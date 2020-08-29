@@ -1,13 +1,14 @@
 use ckb_simple_account_layer::{CkbBlake2bHasher, Config};
 use ckb_types::{
     bytes::{BufMut, Bytes, BytesMut},
-    core::{BlockView, DepType, EpochNumberWithFraction, ScriptHashType},
+    core::{BlockView, Capacity, DepType, EpochNumberWithFraction, ScriptHashType},
     h256, packed,
     prelude::*,
     utilities::{merkle_root, CBMT},
-    H160, H256,
+    H160, H256, U128, U256,
 };
 use ckb_vm::{Error as VMError, Memory, Register, SupportMachine};
+use numext_fixed_uint::prelude::UintConvert;
 use serde::{Deserialize, Serialize};
 use sparse_merkle_tree::{default_store::DefaultStore, SparseMerkleTree, H256 as SmtH256};
 use std::collections::HashMap;
@@ -62,12 +63,15 @@ lazy_static::lazy_static! {
 #[derive(Debug, Clone)]
 pub struct RunConfig {
     pub generator: Bytes,
-    // Type script (validator)
+    // Type script (Validator)
     pub type_dep: packed::CellDep,
     pub type_script: packed::Script,
-    // Lock script
+    // Lock script for contract (default always success)
     pub lock_dep: packed::CellDep,
     pub lock_script: packed::Script,
+    // Lock script for EoA account
+    pub eoa_lock_dep: packed::CellDep,
+    pub eoa_lock_script: packed::Script,
 }
 
 /// A contract account's cell data
@@ -158,6 +162,8 @@ pub struct Program {
     pub sender: H160,
     /// The destination of the message (MUST be verified by the script args).
     pub destination: ContractAddress,
+    /// The value transfer into the destination contract
+    pub value: u128,
     /// The code to create/call the contract
     pub code: Bytes,
     /// The input data to create/call the contract
@@ -172,6 +178,8 @@ pub struct ContractMeta {
     pub tx_hash: H256,
     /// The output index of the transaction where the contract created
     pub output_index: u32,
+    /// The balance of the contract
+    pub balance: u128,
     pub destructed: bool,
 }
 
@@ -190,6 +198,7 @@ pub struct ContractChange {
     pub new_storage: HashMap<H256, H256>,
     pub logs: Vec<(Vec<H256>, Bytes)>,
     pub capacity: u64,
+    pub balance: u64,
     /// The change is create the contract
     pub is_create: bool,
 }
@@ -361,7 +370,7 @@ impl Coinbase {
 }
 
 impl Program {
-    pub fn new_create(tx_origin: EoaAddress, sender: H160, code: Bytes) -> Program {
+    pub fn new_create(tx_origin: EoaAddress, sender: H160, code: Bytes, value: u128) -> Program {
         Program {
             kind: CallKind::CREATE,
             flags: 0,
@@ -371,6 +380,7 @@ impl Program {
             destination: ContractAddress::default(),
             code,
             input: Bytes::default(),
+            value,
         }
     }
 
@@ -380,6 +390,7 @@ impl Program {
         destination: ContractAddress,
         code: Bytes,
         input: Bytes,
+        value: u128,
         is_static: bool,
     ) -> Program {
         let flags = if is_static { 1 } else { 0 };
@@ -392,6 +403,7 @@ impl Program {
             destination,
             code,
             input,
+            value,
         }
     }
 
@@ -407,6 +419,8 @@ impl Program {
         buf.put(self.tx_origin.0.as_bytes());
         buf.put(self.sender.as_bytes());
         buf.put(self.destination.0.as_bytes());
+        let value = U256::from(self.value);
+        buf.put(&value.to_be_bytes()[..]);
 
         buf.put(&(self.code.len() as u32).to_le_bytes()[..]);
         buf.put(self.code.as_ref());
@@ -434,11 +448,14 @@ impl TryFrom<&[u8]> for Program {
         let tx_origin = EoaAddress(load_h160(data, &mut offset)?);
         let sender = load_h160(data, &mut offset)?;
         let destination = ContractAddress(load_h160(data, &mut offset)?);
+        let value = load_u256(data, &mut offset)?;
         let code = load_var_slice(data, &mut offset)?;
         let input = load_var_slice(data, &mut offset)?;
         if !data[offset..].is_empty() {
             return Err(format!("To much data for parse Program: {}", data.len()));
         }
+
+        let value_u128: U128 = value.convert_into().0;
         Ok(Program {
             kind,
             flags,
@@ -446,6 +463,7 @@ impl TryFrom<&[u8]> for Program {
             tx_origin,
             sender,
             destination,
+            value: u128::from_le_bytes(value_u128.to_le_bytes()),
             code: Bytes::from(code.to_vec()),
             input: Bytes::from(input.to_vec()),
         })
@@ -600,6 +618,7 @@ impl ContractMeta {
             code: self.code.clone(),
             tx_hash: self.tx_hash.clone(),
             output_index: self.output_index,
+            balance: self.balance,
             destructed: self.destructed,
         }
     }
@@ -638,6 +657,7 @@ impl ContractChange {
             tx_origin: self.tx_origin.clone(),
             new_storage: self.new_storage.clone().into_iter().collect(),
             capacity: self.capacity,
+            balance: self.balance,
             is_create: self.is_create,
         }
     }
@@ -666,6 +686,16 @@ pub fn h256_to_smth256(hash: &H256) -> SmtH256 {
     let mut buf = [0u8; 32];
     buf.copy_from_slice(hash.as_bytes());
     SmtH256::from(buf)
+}
+
+pub fn account_balance(output: &packed::CellOutput) -> u64 {
+    let capacity: u64 = output.capacity().unpack();
+    let data_capacity = Capacity::shannons((32 + 32) * ONE_CKB);
+    let occupied_capacity: u64 = output
+        .occupied_capacity(data_capacity)
+        .expect("capacity")
+        .as_u64();
+    capacity - occupied_capacity
 }
 
 pub fn load_u32(data: &[u8], offset: &mut usize) -> Result<u32, String> {
@@ -725,6 +755,13 @@ pub fn load_h160(data: &[u8], offset: &mut usize) -> Result<H160, String> {
 pub fn load_h256(data: &[u8], offset: &mut usize) -> Result<H256, String> {
     load_fixed_hash("H256", data, offset, |slice| {
         H256::from_slice(slice).unwrap()
+    })
+}
+pub fn load_u256(data: &[u8], offset: &mut usize) -> Result<U256, String> {
+    load_fixed_hash("U256", data, offset, |slice| {
+        let mut be_bytes = [0u8; 32];
+        be_bytes.copy_from_slice(&slice[..]);
+        U256::from_be_bytes(&be_bytes)
     })
 }
 
@@ -795,6 +832,13 @@ pub fn vm_load_h256<Mac: SupportMachine>(machine: &mut Mac, address: u64) -> Res
     Ok(H256::from_slice(&data).unwrap())
 }
 
+pub fn vm_load_u256<Mac: SupportMachine>(machine: &mut Mac, address: u64) -> Result<U256, VMError> {
+    let data = vm_load_data(machine, address, 32)?;
+    let mut be_bytes = [0u8; 32];
+    be_bytes.copy_from_slice(&data[..]);
+    Ok(U256::from_be_bytes(&be_bytes))
+}
+
 pub fn vm_load_data<Mac: SupportMachine>(
     machine: &mut Mac,
     address: u64,
@@ -833,6 +877,7 @@ mod test {
             Default::default(),
             Default::default(),
             Bytes::from("abcdef"),
+            0,
         );
         let binary = program1.serialize();
         let program2 = Program::try_from(binary.as_ref()).unwrap();
@@ -856,6 +901,7 @@ mod test {
                 Default::default(),
                 Default::default(),
                 Bytes::from("abcdef"),
+                0,
             ),
             return_data: Bytes::from("return data"),
             selfdestruct: None,

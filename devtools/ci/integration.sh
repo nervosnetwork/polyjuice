@@ -97,6 +97,20 @@ ${CKB_BIN} miner -C ${DEV_CHAIN_DIR} -l 4
 VALIDATOR_TX_HASH=$(cat ${VALIDATOR_TX_HASH_PATH})
 VALIDATOR_CODE_HASH=$(ckb-cli util blake2b --binary-path ${PROJECT_ROOT}/c/build/validator_log)
 
+# 3. deploy anyone can pay
+ANYONE_CAN_PAY_TX_HASH_PATH=${INTEGRATION_ROOT}/tx_hash_anyone_can_pay
+ckb-cli wallet transfer \
+        --privkey-path ${PRIVKEY_PATH} \
+        --to-address ckt1qyqdfjzl8ju2vfwjtl4mttx6me09hayzfldq8m3a0y \
+        --tx-fee 0.01 \
+        --capacity 60000 \
+        --to-data-path ${PROJECT_ROOT}/tests/anyone_can_pay \
+    | cut -d ':' -f 2 \
+    | xargs > ${ANYONE_CAN_PAY_TX_HASH_PATH}
+${CKB_BIN} miner -C ${DEV_CHAIN_DIR} -l 4
+ANYONE_CAN_PAY_TX_HASH=$(cat ${ANYONE_CAN_PAY_TX_HASH_PATH})
+ANYONE_CAN_PAY_CODE_HASH=$(ckb-cli util blake2b --binary-path ${PROJECT_ROOT}/tests/anyone_can_pay)
+
 cat > ${INTEGRATION_ROOT}/run_config.json << _RUN_CONFIG_
 {
     "type_dep": {
@@ -120,6 +134,18 @@ cat > ${INTEGRATION_ROOT}/run_config.json << _RUN_CONFIG_
     },
     "lock_script": {
         "code_hash": "0x28e83a1277d48add8e72fadaa9248559e1b632bab2bd60b27955ebc4c03800a5",
+        "hash_type": "data",
+        "args": "0x"
+    },
+    "eoa_lock_dep": {
+        "out_point": {
+            "tx_hash": "${ANYONE_CAN_PAY_TX_HASH}",
+            "index": "0x0"
+        },
+        "dep_type": "code"
+    },
+    "eoa_lock_script": {
+        "code_hash": "${ANYONE_CAN_PAY_CODE_HASH}",
         "hash_type": "data",
         "args": "0x"
     }

@@ -15,13 +15,15 @@
 #define FLAGS_LEN 4
 #define DEPTH_LEN 4
 #define ADDRESS_LEN 20
+#define U256_LEN 32
 #define CALL_KIND_OFFSET (SIGNATURE_LEN + PROGRAM_LEN)
 #define FLAGS_OFFSET (CALL_KIND_OFFSET + CALL_KIND_LEN)
 #define DEPTH_OFFSET (FLAGS_OFFSET + FLAGS_LEN)
 #define TX_ORIGIN_OFFSET (DEPTH_OFFSET + DEPTH_LEN)
 #define SENDER_OFFSET (TX_ORIGIN_OFFSET + ADDRESS_LEN)
 #define DESTINATION_OFFSET (SENDER_OFFSET + ADDRESS_LEN)
-#define CODE_OFFSET (DESTINATION_OFFSET + ADDRESS_LEN)
+#define VALUE_OFFSET (DESTINATION_OFFSET + ADDRESS_LEN)
+#define CODE_OFFSET (VALUE_OFFSET + U256_LEN)
 
 #define is_create(kind) ((kind) == EVMC_CREATE || (kind) == EVMC_CREATE2)
 #define is_special_call(kind) ((kind) == EVMC_CALLCODE || (kind) == EVMC_DELEGATECALL)
@@ -52,6 +54,7 @@ int execute_vm(const uint8_t *source,
   const evmc_address tx_origin = *(evmc_address *)(source + TX_ORIGIN_OFFSET);
   const evmc_address sender = *(evmc_address *)(source + SENDER_OFFSET);
   const evmc_address destination = *(evmc_address *)(source + DESTINATION_OFFSET);
+  const evmc_uint256be value = *(evmc_uint256be *)(source + VALUE_OFFSET);
 
   uint32_t code_size = *(uint32_t *)(source + CODE_OFFSET);
   uint8_t *code_data;
@@ -78,7 +81,7 @@ int execute_vm(const uint8_t *source,
   const uint8_t *return_data = other_data + 4;
   const evmc_address beneficiary = *(evmc_address *)(return_data + return_data_size);
 
-  int ret = verify_params(signature, call_kind, flags, depth, &tx_origin, &sender, &destination,
+  int ret = verify_params(signature, call_kind, flags, depth, &tx_origin, &sender, &destination, &value,
                           code_size, code_data, input_size, input_data);
 
 #ifdef CSAL_VALIDATOR_TYPE
@@ -129,10 +132,15 @@ int execute_vm(const uint8_t *source,
   msg.sender = sender;
   msg.input_data = input_data;
   msg.input_size = input_size;
-  msg.value = evmc_uint256be{};
+  msg.value = value;
   msg.create2_salt = evmc_bytes32{};
 
-  struct evmc_result res = vm->execute(vm, &interface, &context, EVMC_MAX_REVISION, &msg, code_data, code_size);
+  struct evmc_result res;
+  if (is_create(msg.kind) || input_size > 0) {
+    res = vm->execute(vm, &interface, &context, EVMC_MAX_REVISION, &msg, code_data, code_size);
+  } else {
+    res = evmc_result{};
+  }
   *destructed = context.destructed;
   return_result(&msg, &res);
   ret = verify_result(&context, &msg, &res, return_data, return_data_size, &beneficiary);

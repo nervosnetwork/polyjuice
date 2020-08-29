@@ -13,7 +13,7 @@ use std::sync::Arc;
 #[rpc(server)]
 pub trait Rpc {
     #[rpc(name = "create")]
-    fn create(&self, sender: H160, code: JsonBytes) -> RpcResult<TransactionReceipt>;
+    fn create(&self, sender: H160, code: JsonBytes, value: u128) -> RpcResult<TransactionReceipt>;
 
     #[rpc(name = "call")]
     fn call(
@@ -21,6 +21,7 @@ pub trait Rpc {
         sender: H160,
         contract_address: ContractAddress,
         input: JsonBytes,
+        value: u128,
     ) -> RpcResult<TransactionReceipt>;
 
     #[rpc(name = "static_call")]
@@ -65,12 +66,12 @@ pub struct RpcImpl {
 }
 
 impl Rpc for RpcImpl {
-    fn create(&self, sender: H160, code: JsonBytes) -> RpcResult<TransactionReceipt> {
-        log::debug!("create(sender: {:x})", sender);
+    fn create(&self, sender: H160, code: JsonBytes, value: u128) -> RpcResult<TransactionReceipt> {
+        log::debug!("create(sender: {:x}, value: {})", sender, value);
         let loader = Loader::clone(&self.loader);
         let run_config = self.run_config.clone();
         let context = Runner::new(loader, run_config)
-            .create(sender, code.into_bytes())
+            .create(sender, code.into_bytes(), value)
             .map_err(convert_err_box)?;
         let resp = TransactionReceipt::try_from(context).map_err(convert_err);
         log::debug!("create finished");
@@ -82,6 +83,7 @@ impl Rpc for RpcImpl {
         sender: H160,
         contract_address: ContractAddress,
         input: JsonBytes,
+        value: u128,
     ) -> RpcResult<TransactionReceipt> {
         log::debug!(
             "call(sender: {:x}, contract_address: {:x}, input: {})",
@@ -92,7 +94,7 @@ impl Rpc for RpcImpl {
         let loader = Loader::clone(&self.loader);
         let run_config = self.run_config.clone();
         let context = Runner::new(loader, run_config)
-            .call(sender, contract_address, input.into_bytes())
+            .call(sender, contract_address, input.into_bytes(), value)
             .map_err(convert_err_box)?;
         let resp = TransactionReceipt::try_from(context).map_err(convert_err);
         log::debug!("call finished");

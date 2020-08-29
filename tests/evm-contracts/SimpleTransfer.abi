@@ -1,0 +1,1 @@
+[{"inputs":[],"stateMutability":"payable","type":"constructor"},{"inputs":[{"internalType":"address payable","name":"target","type":"address"}],"name":"transferTo","outputs":[],"stateMutability":"payable","type":"function"}]

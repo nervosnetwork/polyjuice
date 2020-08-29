@@ -92,6 +92,7 @@ cbmt_node node_merge(void *merge_ctx,
 }
 
 #define MAX_CONTRACT_COUNT 64
+#define MAX_EOA_COUNT 1024
 #define MAX_HEADER_COUNT 128
 #define HEADER_SIZE 4096
 
@@ -147,6 +148,8 @@ typedef struct {
   /* if CREATE, update this field after first call */
   uint8_t *code_data;
   size_t code_size;
+  uint64_t capacity;
+  uint64_t balance;
   /* Variable */
   contract_program *head_program;
   contract_program *current_program;
@@ -164,6 +167,11 @@ typedef struct {
   /* Transactions root hash */
   evmc_bytes32 transactions_root;
 } header_info;
+
+typedef struct {
+  uint64_t balance;
+  evmc_address address;
+} eoa_account;
 
 static bool global_touched = false;
 static contract_info global_info_list[MAX_CONTRACT_COUNT];
@@ -438,6 +446,8 @@ int contract_info_next_program(contract_info *info) {
 
   if (global_current_is_main) {
     if (program->call_index != program->calls_count) {
+      debug_print_int("program->call_index", program->call_index);
+      debug_print_int("program->calls_count", program->calls_count);
       debug_print("sub program calls not finished");
       return -99;
     }
@@ -618,8 +628,11 @@ int contract_info_call(const contract_info *sender_info,
     }
     /* call code is checked in it's own script group */
     if (dest_program->input_size == 0) {
-      debug_print("CALL input size can not be zero");
-      return -99;
+      evmc_uint256be zero_value = evmc_uint256be{};
+      if (memcmp(zero_value.bytes, msg->value.bytes, 32) == 0) {
+        debug_print("CALL input size can not be zero");
+        return -99;
+      }
     }
     if (dest_program->input_size != msg->input_size) {
       debug_print("CALL input size not match");
@@ -731,8 +744,19 @@ size_t copy_code(struct evmc_host_context* context,
 
 evmc_uint256be get_balance(struct evmc_host_context* context,
                            const evmc_address* address) {
-  // TODO: how to return balance?
+  debug_print_data("[get_balance]", address->bytes, 20);
   evmc_uint256be balance{};
+  contract_info *info = NULL;
+  find_contract_info(&info, global_info_list, global_info_count, address);
+  if (info != NULL) {
+    ckb_debug("load balance from contract");
+    intx::uint256 value = info->balance;
+    intx::be::store(balance.bytes, value);
+  } else {
+    ckb_debug("load balance from EoA accout");
+    // FIXME: how to return EoA balance?
+  }
+  debug_print_data("[get_balance], value:", balance.bytes, 32);
   return balance;
 }
 
@@ -750,6 +774,8 @@ struct evmc_result call(struct evmc_host_context* context,
   debug_print_int("call().depth: ", msg->depth);
   debug_print_data("call().sender     : ", msg->sender.bytes, 20);
   debug_print_data("call().destination: ", msg->destination.bytes, 20);
+  debug_print_data("call().value      : ", msg->value.bytes, 32);
+  debug_print_data("call().input      : ", msg->input_data, msg->input_size);
 
   int ret;
   struct evmc_result res{};
@@ -781,7 +807,6 @@ struct evmc_result call(struct evmc_host_context* context,
   } else {
     memcpy(destination.bytes, msg->destination.bytes, 20);
   }
-
 
   find_contract_info(&dest_info, global_info_list, global_info_count, &destination);
   if (dest_info == NULL) {
@@ -916,16 +941,24 @@ int load_contract_infos() {
 
   /* Load all contract witness in current transaction */
   uint8_t type_script[SCRIPT_SIZE];
+  uint8_t lock_script[SCRIPT_SIZE];
+  uint8_t cell_data[128];
   size_t input_index = 0;
+  uint64_t capacity;
+  uint64_t balance;
+  uint64_t type_script_size;
+  uint64_t lock_script_size;
+  uint64_t cell_data_size;
   while (1) {
     if (global_info_count >= MAX_CONTRACT_COUNT) {
       debug_print("too many contract in one transaction");
       return -100;
     }
+
     len = SCRIPT_SIZE;
     ret = ckb_load_cell_by_field(type_script, &len, 0, input_index, CKB_SOURCE_INPUT, CKB_CELL_FIELD_TYPE);
     if (ret == CKB_INDEX_OUT_OF_BOUND) {
-      debug_print("load inputs finised");
+      debug_print("load inputs finished");
       break;
     } else if (ret == CKB_ITEM_MISSING) {
       debug_print_int("ignore input", input_index);
@@ -935,9 +968,48 @@ int load_contract_infos() {
       debug_print_int("load type script from input failed", input_index);
       return ret;
     }
+    type_script_size = len;
+
+    /* capacity */
+    len = 8;
+    ret = ckb_load_cell_by_field(&capacity, &len, 0, input_index, CKB_SOURCE_INPUT, CKB_CELL_FIELD_CAPACITY);
+    if (ret != CKB_SUCCESS) {
+      debug_print_int("load capacity failed, ret:", ret);
+      return ret;
+    }
+    if (len != 8) {
+      debug_print_int("load capacity invlaid len:", len);
+      return -100;
+    }
+    /* lock script size */
+    len = SCRIPT_SIZE;
+    ret = ckb_load_cell_by_field(&lock_script, &len, 0, input_index, CKB_SOURCE_INPUT, CKB_CELL_FIELD_LOCK);
+    if (ret != CKB_SUCCESS) {
+      debug_print_int("load lock script failed, ret:", ret);
+      return ret;
+    }
+    lock_script_size = len;
+    /* cell data size */
+    len = 128;
+    ret = ckb_load_cell_data(&cell_data, &len, 0, input_index, CKB_SOURCE_INPUT);
+    if (ret != CKB_SUCCESS) {
+      debug_print_int("load cell data failed, ret:", ret);
+      return ret;
+    }
+    if (len != 64) {
+      debug_print_int("load cell data invlaid len:", len);
+      return -100;
+    }
+    cell_data_size = len;
+    if (capacity < (8 + type_script_size + lock_script_size + cell_data_size)) {
+      ckb_debug("this is impossible!!!");
+      return -100;
+    }
+    balance = capacity - 8 - type_script_size - lock_script_size - cell_data_size;
+
     debug_print_int("loaded input", input_index);
     bool code_matched = false;
-    ret = check_script_code(script, script_size, type_script, len, &code_matched);
+    ret = check_script_code(script, script_size, type_script, type_script_size, &code_matched);
     if (ret != CKB_SUCCESS) {
       debug_print_int("check type script from input failed", input_index);
       return ret;
@@ -945,7 +1017,7 @@ int load_contract_infos() {
     if (code_matched) {
       mol_seg_t script_seg;
       script_seg.ptr = type_script;
-      script_seg.size = len;
+      script_seg.size = type_script_size;
       mol_seg_t args_seg = MolReader_Script_get_args(&script_seg);
       mol_seg_t args_bytes_seg = MolReader_Bytes_raw_bytes(&args_seg);
       if (args_bytes_seg.size != CSAL_SCRIPT_ARGS_LEN) {
@@ -974,6 +1046,8 @@ int load_contract_infos() {
       mol_seg_t content_bytes_seg = MolReader_Bytes_raw_bytes(&content_seg);
       debug_print_int("parse input contract info", input_index);
       contract_info *info = global_info_list + global_info_count;
+      info->capacity = capacity;
+      info->balance = balance;
       ret = contract_info_init(info, content_bytes_seg.ptr, content_bytes_seg.size, &tmp_addr);
       if (ret != CKB_SUCCESS) {
         return ret;
@@ -994,7 +1068,7 @@ int load_contract_infos() {
     len = SCRIPT_SIZE;
     ret = ckb_load_cell_by_field(type_script, &len, 0, output_index, CKB_SOURCE_OUTPUT, CKB_CELL_FIELD_TYPE);
     if (ret == CKB_INDEX_OUT_OF_BOUND) {
-      debug_print("load outputs finised");
+      debug_print("load outputs finished");
       break;
     } else if (ret == CKB_ITEM_MISSING) {
       debug_print_int("ignore output", output_index);
@@ -1004,9 +1078,49 @@ int load_contract_infos() {
       debug_print_int("load type script from output failed", output_index);
       return ret;
     }
+
+    type_script_size = len;
+
+    /* capacity */
+    len = 8;
+    ret = ckb_load_cell_by_field(&capacity, &len, 0, output_index, CKB_SOURCE_OUTPUT, CKB_CELL_FIELD_CAPACITY);
+    if (ret != CKB_SUCCESS) {
+      debug_print_int("load capacity failed, ret:", ret);
+      return ret;
+    }
+    if (len != 8) {
+      debug_print_int("load capacity invlaid len:", len);
+      return -100;
+    }
+    /* lock script size */
+    len = SCRIPT_SIZE;
+    ret = ckb_load_cell_by_field(&lock_script, &len, 0, output_index, CKB_SOURCE_OUTPUT, CKB_CELL_FIELD_LOCK);
+    if (ret != CKB_SUCCESS) {
+      debug_print_int("load lock script failed, ret:", ret);
+      return ret;
+    }
+    lock_script_size = len;
+    /* cell data size */
+    len = 128;
+    ret = ckb_load_cell_data(&cell_data, &len, 0, output_index, CKB_SOURCE_OUTPUT);
+    if (ret != CKB_SUCCESS) {
+      debug_print_int("load cell data failed, ret:", ret);
+      return ret;
+    }
+    if (len != 64) {
+      debug_print_int("load cell data invlaid len:", len);
+      return -100;
+    }
+    cell_data_size = len;
+    if (capacity < (8 + type_script_size + lock_script_size + cell_data_size)) {
+      ckb_debug("this is impossible!!!");
+      return -100;
+    }
+    balance = capacity - 8 - type_script_size - lock_script_size - cell_data_size;
+
     debug_print_int("loaded output", output_index);
     bool code_matched = false;
-    ret = check_script_code(script, script_size, type_script, len, &code_matched);
+    ret = check_script_code(script, script_size, type_script, type_script_size, &code_matched);
     if (ret != CKB_SUCCESS) {
       debug_print_int("checkout type script from output failed", output_index);
       return ret;
@@ -1014,7 +1128,7 @@ int load_contract_infos() {
     if (code_matched) {
       mol_seg_t script_seg;
       script_seg.ptr = type_script;
-      script_seg.size = len;
+      script_seg.size = type_script_size;
       mol_seg_t args_seg = MolReader_Script_get_args(&script_seg);
       mol_seg_t args_bytes_seg = MolReader_Bytes_raw_bytes(&args_seg);
       if (args_bytes_seg.size != CSAL_SCRIPT_ARGS_LEN) {
@@ -1051,6 +1165,8 @@ int load_contract_infos() {
         mol_seg_t content_bytes_seg = MolReader_Bytes_raw_bytes(&content_seg);
         debug_print_int("parse output contract info", output_index);
         contract_info *info = global_info_list + global_info_count;
+        info->capacity = capacity;
+        info->balance = balance;
         ret = contract_info_init(info, content_bytes_seg.ptr, content_bytes_seg.size, &tmp_addr);
         if (ret != CKB_SUCCESS) {
           return ret;
@@ -1150,7 +1266,6 @@ int verify_contract_code(blake2b_state *blake2b_ctx,
     len = 32;
     ret = ckb_load_cell_data(hash, &len, 32, 0, CKB_SOURCE_GROUP_OUTPUT);
     if (ret == CKB_SUCCESS) {
-      debug_print("load cell data from output failed");
       if (len != 32) {
         return -102;
       }
@@ -1159,6 +1274,7 @@ int verify_contract_code(blake2b_state *blake2b_ctx,
         return -103;
       }
     } else if (ret != CKB_INDEX_OUT_OF_BOUND) {
+      debug_print("load cell data from output failed");
       return ret;
     }
   }
@@ -1264,15 +1380,13 @@ int load_tx_context(blake2b_state *blake2b_ctx) {
   mol_seg_t compact_target_seg = MolReader_RawHeader_get_compact_target(&raw_seg);
   uint32_t compact_target = *((uint32_t *)compact_target_seg.ptr);
 
-  /* gas_price = 0 */
-  memset(global_tx_context.tx_gas_price.bytes, 0, 20);
   /* already exists */
   global_tx_context.block_number = (int64_t)block_number;
   global_tx_context.block_timestamp = (int64_t)timestamp;
   /* int64_t::MAX */
   global_tx_context.block_gas_limit = 9223372036854775807;
-  /* gas_price = 0 */
-  global_tx_context.tx_gas_price = evmc_uint256be{};
+  /* gas_price = 1 wei */
+  global_tx_context.tx_gas_price.bytes[31] = 0x01;
   /* TODO block_coinbase */
   /* convert from compact_target */
   global_tx_context.block_difficulty = compact_to_difficulty(compact_target);
@@ -1439,6 +1553,7 @@ inline int verify_params(const uint8_t *signature_data,
                          const evmc_address *tx_origin,
                          const evmc_address *sender,
                          const evmc_address *destination,
+                         const evmc_uint256be *value,
                          const uint32_t code_size,
                          const uint8_t *code_data,
                          const uint32_t input_size,
@@ -1450,6 +1565,7 @@ inline int verify_params(const uint8_t *signature_data,
   debug_print_data("tx_origin  : ", tx_origin->bytes, 20);
   debug_print_data("sender     : ", sender->bytes, 20);
   debug_print_data("destination: ", destination->bytes, 20);
+  debug_print_data("      value: ", value->bytes, 32);
   debug_print_data("code : ", code_data, code_size);
   debug_print_data("input: ", input_data, input_size);
 

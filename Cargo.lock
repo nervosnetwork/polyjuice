@@ -1924,6 +1924,7 @@ dependencies = [
  "jsonrpc-server-utils",
  "lazy_static",
  "log",
+ "numext-fixed-uint",
  "reqwest 0.10.6",
  "rocksdb",
  "secp256k1 0.17.2",

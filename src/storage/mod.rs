@@ -327,6 +327,7 @@ pub mod value {
         pub tx_origin: EoaAddress,
         pub new_storage: Vec<(H256, H256)>,
         pub capacity: u64,
+        pub balance: u64,
         pub is_create: bool,
     }
 
@@ -337,6 +338,8 @@ pub mod value {
         pub tx_hash: H256,
         /// The output index of the transaction where the contract created
         pub output_index: u32,
+        /// The balance of the contract
+        pub balance: u128,
         /// Check if the contract is destructed
         pub destructed: bool,
     }
