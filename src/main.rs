@@ -3,6 +3,7 @@ mod server;
 mod storage;
 mod types;
 
+use client::HttpRpcClient;
 use jsonrpc_core::IoHandler;
 use jsonrpc_http_server::ServerBuilder;
 use jsonrpc_server_utils::cors::AccessControlAllowOrigin;
@@ -10,9 +11,10 @@ use jsonrpc_server_utils::hosts::DomainsValidation;
 
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_jsonrpc_types as json_types;
+use ckb_sdk::{build_signature, Address, AddressPayload, HumanCapacity, NetworkType};
 use ckb_types::{
     bytes::{BufMut, Bytes, BytesMut},
-    core, packed,
+    h256, packed,
     prelude::*,
     H160, H256,
 };
@@ -20,13 +22,18 @@ use clap::{App, Arg, SubCommand};
 use rocksdb::DB;
 use serde::{Deserialize, Serialize};
 use server::{Rpc, RpcImpl, TransactionReceipt};
+use std::collections::HashMap;
 use std::fs;
 use std::process::Command;
+use std::str::FromStr;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use storage::{Indexer, Loader};
 use tempfile::NamedTempFile;
-use types::{CallKind, ContractAddress, EoaAddress, Program, RunConfig, WitnessData, SECP256K1};
+use types::{CallKind, EoaAddress, Program, RunConfig, WitnessData, ONE_CKB, SECP256K1};
+
+const ANYONE_CAN_PAY_CODE_HASH: H256 =
+    h256!("0x8b10144daa110152e78dd002b44f429238cbbee5e62052205fdc6a1fc2c57a2a");
 
 fn main() -> Result<(), String> {
     env_logger::init();
@@ -37,6 +44,17 @@ fn main() -> Result<(), String> {
         .required(true)
         .default_value("http://127.0.0.1:8114")
         .help("The ckb rpc url");
+    let arg_privkey = Arg::with_name("privkey")
+        .long("privkey")
+        .short("k")
+        .takes_value(true)
+        .required(true)
+        .validator(|input| {
+            fs::File::open(input)
+                .map(|_| ())
+                .map_err(|err| err.to_string())
+        })
+        .help("The private key file (hex)");
     let matches = App::new("polyjuice")
         .subcommand(
             SubCommand::with_name("run")
@@ -87,15 +105,7 @@ fn main() -> Result<(), String> {
                         .validator(|input| fs::File::open(input).map(|_| ()).map_err(|err| err.to_string()))
                         .help("The transaction receipt file (json)")
                 )
-                .arg(
-                    Arg::with_name("privkey")
-                        .long("privkey")
-                        .short("k")
-                        .takes_value(true)
-                        .required(true)
-                        .validator(|input| fs::File::open(input).map(|_| ()).map_err(|err| err.to_string()))
-                        .help("The private key file (hex)")
-                )
+                .arg(arg_privkey.clone())
                 .arg(
                     Arg::with_name("output")
                         .long("output")
@@ -103,7 +113,21 @@ fn main() -> Result<(), String> {
                         .takes_value(true)
                         .help("The output file path")
                 )
-                .arg(arg_ckb_url)
+                .arg(arg_ckb_url.clone())
+        )
+        .subcommand(
+            SubCommand::with_name("new-eoa-account")
+                .about("Create an EoA account")
+                .arg(arg_privkey.clone())
+                .arg(
+                    Arg::with_name("balance")
+                        .long("balance")
+                        .takes_value(true)
+                        .required(true)
+                        .validator(|input| HumanCapacity::from_str(input.as_str()).map(|_| ()))
+                        .help("The balance to target EoA account (unit: CKB, format: 123.335, need extra capacity to create the cell)")
+                )
+                .arg(arg_ckb_url.clone())
         )
         .subcommand(
             SubCommand::with_name("build-tx")
@@ -245,6 +269,9 @@ fn main() -> Result<(), String> {
                 .and_then(|data| {
                     secp256k1::SecretKey::from_slice(data.as_slice()).map_err(|err| err.to_string())
                 })?;
+            let pubkey = secp256k1::PublicKey::from_secret_key(&SECP256K1, &privkey);
+            let tx_origin_lock_arg =
+                H160::from_slice(&blake2b_256(&pubkey.serialize()[..])[0..20]).unwrap();
             let ckb_uri = m.value_of("url").unwrap();
 
             println!("Building signature");
@@ -317,11 +344,119 @@ fn main() -> Result<(), String> {
             };
 
             tx_receipt.tx.witnesses[0] = json_types::JsonBytes::from_bytes(witness.as_bytes());
-            let tx_body: serde_json::Value = serde_json::to_value(&tx_receipt.tx).unwrap();
+            while tx_receipt.tx.witnesses.len() < tx_receipt.tx.inputs.len() {
+                tx_receipt.tx.witnesses.push(Default::default());
+            }
+
+            println!("Sign anyone can pay");
+            let tx_view = packed::Transaction::from(tx_receipt.tx.clone()).into_view();
+            let mut client = HttpRpcClient::new(ckb_uri.to_string());
+            // {lock_arg => {type_hash => (input_index, input_capacity, output_capacity)}}
+            let mut eoa_cells: HashMap<H160, HashMap<H256, (usize, u64, u64)>> = Default::default();
+            for (idx, input) in tx_view.inputs().into_iter().enumerate() {
+                let output: packed::CellOutput =
+                    get_live_cell(&mut client, input.previous_output().into(), false)?.into();
+                let lock_script = output.lock();
+                let code_hash: H256 = lock_script.code_hash().unpack();
+                if code_hash == ANYONE_CAN_PAY_CODE_HASH {
+                    let type_hash: H256 = output
+                        .type_()
+                        .to_opt()
+                        .expect("type id type script should exists")
+                        .calc_script_hash()
+                        .unpack();
+                    let input_capacity: u64 = output.capacity().unpack();
+                    let lock_arg =
+                        H160::from_slice(lock_script.args().raw_data().as_ref()).unwrap();
+                    let value = eoa_cells.entry(lock_arg).or_default();
+                    if value.contains_key(&type_hash) {
+                        return Err(format!("duplicated type script hash: {:x}", type_hash));
+                    }
+                    value.insert(type_hash, (idx, input_capacity, 0));
+                }
+            }
+            for output in tx_view.outputs().into_iter() {
+                let lock_script = output.lock();
+                let code_hash: H256 = lock_script.code_hash().unpack();
+                if code_hash == ANYONE_CAN_PAY_CODE_HASH {
+                    let type_hash: H256 = output
+                        .type_()
+                        .to_opt()
+                        .expect("type id type script should exists")
+                        .calc_script_hash()
+                        .unpack();
+                    let output_capacity: u64 = output.capacity().unpack();
+                    let lock_arg =
+                        H160::from_slice(lock_script.args().raw_data().as_ref()).unwrap();
+                    if let Some(value) = eoa_cells.get_mut(&lock_arg) {
+                        if let Some(inner_value) = value.get_mut(&type_hash) {
+                            inner_value.2 = output_capacity;
+                        } else {
+                            return Err(format!("type hash not found in output: {:x}", type_hash));
+                        }
+                    } else {
+                        return Err(format!("lock arg not found in output: {:x}", lock_arg));
+                    }
+                }
+            }
+            for (lock_arg, type_scripts) in eoa_cells {
+                let mut need_signature = false;
+                let mut idxs = type_scripts
+                    .values()
+                    .map(|(idx, _, _)| *idx)
+                    .collect::<Vec<_>>();
+                idxs.sort();
+                for (_, input_capacity, output_capacity) in type_scripts.values() {
+                    if input_capacity > output_capacity {
+                        need_signature = true;
+                        break;
+                    }
+                }
+
+                let lock_field = if need_signature {
+                    if lock_arg != tx_origin_lock_arg {
+                        return Err(format!("The only tx_origin need anyone can pay signature, current lock arg: {:x}", lock_arg));
+                    }
+                    let input_size = tx_view.inputs().len();
+                    let witnesses: Vec<packed::Bytes> = tx_view.witnesses().into_iter().collect();
+                    let signature = build_signature(
+                        &tx_view,
+                        input_size,
+                        &idxs,
+                        &witnesses,
+                        None,
+                        |message: &H256, _tx| {
+                            let message =
+                                secp256k1::Message::from_slice(message.as_bytes()).unwrap();
+                            Ok(serialize_signature(
+                                &SECP256K1.sign_recoverable(&message, &privkey),
+                            ))
+                        },
+                    )?;
+
+                    Some(signature)
+                } else {
+                    Some(Default::default())
+                };
+
+                let first_witness = &tx_receipt.tx.witnesses[idxs[0]];
+                let init_witness = if first_witness.is_empty() {
+                    packed::WitnessArgs::default()
+                } else {
+                    packed::WitnessArgs::from_slice(first_witness.as_bytes())
+                        .map_err(|err| err.to_string())?
+                };
+                tx_receipt.tx.witnesses[idxs[0]] = json_types::JsonBytes::from_bytes(
+                    init_witness
+                        .as_builder()
+                        .lock(lock_field.pack())
+                        .build()
+                        .as_bytes(),
+                );
+            }
 
             let tx_file = NamedTempFile::new().map_err(|err| err.to_string())?;
             let tx_path_str = tx_file.path().to_str().unwrap();
-
             println!(
                 "[Command]: ckb-cli --url {} tx init --tx-file {}",
                 ckb_uri, tx_path_str
@@ -337,48 +472,90 @@ fn main() -> Result<(), String> {
                 println!("[stderr]: {}", String::from_utf8_lossy(&output.stderr));
             }
 
-            // Replace transaction in --tx-file
+            let tx_body: serde_json::Value = serde_json::to_value(&tx_receipt.tx).unwrap();
             let cli_tx_content = fs::read_to_string(tx_path_str).unwrap();
             let mut cli_tx: serde_json::Value = serde_json::from_str(&cli_tx_content).unwrap();
             cli_tx["transaction"] = tx_body;
-            fs::write(
-                tx_path_str,
-                serde_json::to_string_pretty(&cli_tx).unwrap().as_bytes(),
-            )
-            .unwrap();
-
-            println!(
-                "[Command]: tx sign-inputs --privkey-path {} --tx-file {} --add-signatures --skip-check",
-                privkey_path, tx_path_str
-            );
-            let output = Command::new("ckb-cli")
-                .args(&[
-                    "--url",
-                    ckb_uri,
-                    "tx",
-                    "sign-inputs",
-                    "--privkey-path",
-                    privkey_path,
-                    "--tx-file",
-                    tx_path_str,
-                    "--add-signatures",
-                    "--skip-check",
-                ])
-                .output()
-                .expect("Failed to execute command");
-            if output.status.success() {
-                println!("success!");
-            } else {
-                println!("[stdout]: {}", String::from_utf8_lossy(&output.stdout));
-                println!("[stderr]: {}", String::from_utf8_lossy(&output.stderr));
-            }
-
-            let cli_tx_content = fs::read_to_string(tx_path_str).unwrap();
+            let cli_tx_content = serde_json::to_string_pretty(&cli_tx).unwrap();
             if let Some(output) = m.value_of("output") {
                 fs::write(output, cli_tx_content.as_bytes()).map_err(|err| err.to_string())?;
             } else {
                 println!("{}", cli_tx_content);
             }
+        }
+        ("new-eoa-account", Some(m)) => {
+            let balance_str = m.value_of("balance").unwrap();
+            let ckb_uri = m.value_of("url").unwrap();
+            let privkey_path = m.value_of("privkey").unwrap();
+            let privkey = fs::read_to_string(privkey_path)
+                .map_err(|err| err.to_string())
+                .and_then(|privkey| {
+                    hex::decode(&privkey.trim().as_bytes()[0..64]).map_err(|err| err.to_string())
+                })
+                .and_then(|data| {
+                    secp256k1::SecretKey::from_slice(data.as_slice()).map_err(|err| err.to_string())
+                })?;
+
+            let balance = HumanCapacity::from_str(balance_str).unwrap().0;
+            let capacity = balance + ONE_CKB * (8 + (32 + 1 + 32) + (32 + 1 + 20));
+            let capacity_string = HumanCapacity(capacity).to_string();
+            let mut client = HttpRpcClient::new(ckb_uri.to_string());
+            let chain_info = client.get_blockchain_info()?;
+            let network = NetworkType::from_raw_str(chain_info.chain.as_str())
+                .ok_or_else(|| format!("Unexpected network type: {}", chain_info.chain))?;
+            // FIXME: transfer to anyone-can-pay
+            let pubkey = secp256k1::PublicKey::from_secret_key(&SECP256K1, &privkey);
+            let lock_arg = H160::from_slice(&blake2b_256(&pubkey.serialize()[..])[0..20]).unwrap();
+            println!("[lock-arg]: 0x{:x}", lock_arg);
+            let address_payload = AddressPayload::new_full_data(
+                ANYONE_CAN_PAY_CODE_HASH.pack(),
+                Bytes::from(lock_arg.as_bytes().to_vec()),
+            );
+            let address_string = Address::new(network, address_payload).to_string();
+            println!(
+                "[Command]: ckb-cli wallet transfer --privkey-path {} --to-address {} --capacity {} --tx-fee 0.001 --type-id --skip-check-to-address",
+                privkey_path,
+                address_string,
+                capacity_string,
+            );
+            let output = Command::new("ckb-cli")
+                .args(&["--url", ckb_uri])
+                .args(&["wallet", "transfer"])
+                .args(&["--privkey-path", privkey_path])
+                .args(&["--to-address", address_string.as_str()])
+                .args(&["--capacity", capacity_string.as_str()])
+                .args(&["--tx-fee", "0.001"])
+                .args(&["--type-id", "--skip-check-to-address"])
+                .output()
+                .expect("Failed to execute command");
+            if output.status.success() {
+                println!(
+                    "tx-hash: {}, output-index: 0",
+                    String::from_utf8_lossy(&output.stdout).trim()
+                );
+            } else {
+                println!("[stdout]: {}", String::from_utf8_lossy(&output.stdout));
+                println!("[stderr]: {}", String::from_utf8_lossy(&output.stderr));
+                return Err(String::from("failed"));
+            }
+            let tx_hash_string = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .chars()
+                .skip(2)
+                .collect::<String>();
+            let tx_hash = H256::from_str(tx_hash_string.as_str()).unwrap();
+            let tx_with_status = client.get_transaction(tx_hash)?.unwrap();
+            let output = tx_with_status.transaction.inner.outputs[0].clone();
+            let type_args = output.type_.unwrap().args;
+            let lock_args = output.lock.args;
+            let mut blake2b = new_blake2b();
+            println!("[type_args]: {}", hex::encode(type_args.as_bytes()));
+            println!("[lock_args]: {}", hex::encode(lock_args.as_bytes()));
+            blake2b.update(type_args.as_bytes());
+            blake2b.update(lock_args.as_bytes());
+            let mut ret = [0u8; 32];
+            blake2b.finalize(&mut ret);
+            println!("0x{}", hex::encode(&ret[0..20]));
         }
         ("build-tx", Some(m)) => {
             let signature = m
@@ -401,9 +578,7 @@ fn main() -> Result<(), String> {
             let flags: u32 = if m.is_present("static") { 1 } else { 0 };
             let depth: u32 = m.value_of("depth").unwrap().parse::<u32>().unwrap();
             let sender = parse_h160(m.value_of("sender").unwrap()).unwrap();
-            let destination = parse_h160(m.value_of("destination").unwrap())
-                .map(ContractAddress)
-                .unwrap();
+            let destination = parse_h160(m.value_of("destination").unwrap()).unwrap();
             let code = parse_hex_binary(m.value_of("code").unwrap())
                 .map(Bytes::from)
                 .unwrap();
@@ -435,6 +610,35 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
+pub fn get_live_cell(
+    client: &mut HttpRpcClient,
+    out_point: json_types::OutPoint,
+    with_data: bool,
+) -> Result<json_types::CellOutput, String> {
+    let cell = client.get_live_cell(out_point.clone(), with_data)?;
+    if cell.status != "live" {
+        return Err(format!(
+            "Invalid cell status: {}, out_point: {:?}",
+            cell.status, out_point
+        ));
+    }
+    let cell_status = cell.status.clone();
+    cell.cell.map(|cell| cell.output).ok_or_else(|| {
+        format!(
+            "Invalid input cell, status: {}, out_point: {:?}",
+            cell_status, out_point
+        )
+    })
+}
+
+pub fn serialize_signature(signature: &secp256k1::recovery::RecoverableSignature) -> [u8; 65] {
+    let (recov_id, data) = signature.serialize_compact();
+    let mut signature_bytes = [0u8; 65];
+    signature_bytes[0..64].copy_from_slice(&data[0..64]);
+    signature_bytes[64] = recov_id.to_i32() as u8;
+    signature_bytes
+}
+
 fn parse_h160(input: &str) -> Result<H160, String> {
     serde_json::from_str(format!("\"{}\"", input).as_str()).map_err(|err| err.to_string())
 }
@@ -461,38 +665,4 @@ pub struct RunConfigJson {
     // Lock script for EoA account
     pub eoa_lock_dep: json_types::CellDep,
     pub eoa_lock_script: json_types::Script,
-}
-
-pub fn build_signature<S: FnMut(&H256) -> Result<[u8; 65], String>>(
-    tx: &core::TransactionView,
-    input_group_idxs: &[usize],
-    witnesses: &[packed::Bytes],
-    mut signer: S,
-) -> Result<Bytes, String> {
-    let init_witness_idx = input_group_idxs[0];
-    let init_witness = if witnesses[init_witness_idx].raw_data().is_empty() {
-        packed::WitnessArgs::default()
-    } else {
-        packed::WitnessArgs::from_slice(witnesses[init_witness_idx].raw_data().as_ref())
-            .map_err(|err| err.to_string())?
-    };
-
-    let init_witness = init_witness
-        .as_builder()
-        .lock(Some(Bytes::from(vec![0u8; 65])).pack())
-        .build();
-
-    let mut blake2b = new_blake2b();
-    blake2b.update(tx.hash().as_slice());
-    blake2b.update(&(init_witness.as_bytes().len() as u64).to_le_bytes());
-    blake2b.update(&init_witness.as_bytes());
-    for idx in input_group_idxs.iter().skip(1).cloned() {
-        let other_witness: &packed::Bytes = &witnesses[idx];
-        blake2b.update(&(other_witness.len() as u64).to_le_bytes());
-        blake2b.update(&other_witness.raw_data());
-    }
-    let mut message = [0u8; 32];
-    blake2b.finalize(&mut message);
-    let message = H256::from(message);
-    signer(&message).map(|data| Bytes::from(data.to_vec()))
 }

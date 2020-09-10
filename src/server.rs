@@ -13,7 +13,7 @@ use std::sync::Arc;
 #[rpc(server)]
 pub trait Rpc {
     #[rpc(name = "create")]
-    fn create(&self, sender: H160, code: JsonBytes, value: u128) -> RpcResult<TransactionReceipt>;
+    fn create(&self, sender: H160, code: JsonBytes, value: u64) -> RpcResult<TransactionReceipt>;
 
     #[rpc(name = "call")]
     fn call(
@@ -21,7 +21,7 @@ pub trait Rpc {
         sender: H160,
         contract_address: ContractAddress,
         input: JsonBytes,
-        value: u128,
+        value: u64,
     ) -> RpcResult<TransactionReceipt>;
 
     #[rpc(name = "static_call")]
@@ -58,6 +58,9 @@ pub trait Rpc {
         filter_topics: Option<Vec<H256>>,
         limit: Option<u32>,
     ) -> RpcResult<Vec<LogInfo>>;
+
+    #[rpc(name = "get_balance")]
+    fn get_balance(&self, address: H160) -> RpcResult<u64>;
 }
 
 pub struct RpcImpl {
@@ -66,7 +69,7 @@ pub struct RpcImpl {
 }
 
 impl Rpc for RpcImpl {
-    fn create(&self, sender: H160, code: JsonBytes, value: u128) -> RpcResult<TransactionReceipt> {
+    fn create(&self, sender: H160, code: JsonBytes, value: u64) -> RpcResult<TransactionReceipt> {
         log::debug!("create(sender: {:x}, value: {})", sender, value);
         let loader = Loader::clone(&self.loader);
         let run_config = self.run_config.clone();
@@ -83,7 +86,7 @@ impl Rpc for RpcImpl {
         sender: H160,
         contract_address: ContractAddress,
         input: JsonBytes,
-        value: u128,
+        value: u64,
     ) -> RpcResult<TransactionReceipt> {
         log::debug!(
             "call(sender: {:x}, contract_address: {:x}, input: {})",
@@ -185,6 +188,19 @@ impl Rpc for RpcImpl {
                         }
                     })
                     .collect::<Vec<_>>()
+            })
+            .map_err(convert_err)
+    }
+
+    fn get_balance(&self, address: H160) -> RpcResult<u64> {
+        let mut loader = Loader::clone(&self.loader);
+        loader
+            .load_eoa_live_cell(address.clone())
+            .map(|(cell, _, _)| cell.balance())
+            .or_else(|_err| {
+                loader
+                    .load_contract_meta(ContractAddress(address.clone()))
+                    .map(|meta| meta.balance)
             })
             .map_err(convert_err)
     }

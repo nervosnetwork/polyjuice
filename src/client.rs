@@ -1,6 +1,6 @@
 use ckb_jsonrpc_types::{
-    BlockNumber, BlockView, CellWithStatus, EpochNumber, EpochView, HeaderView, OutPoint,
-    TransactionWithStatus,
+    BlockNumber, BlockView, CellWithStatus, ChainInfo, EpochNumber, EpochView, HeaderView,
+    OutPoint, TransactionWithStatus,
 };
 use ckb_types::H256;
 
@@ -70,6 +70,7 @@ jsonrpc!(pub struct RawHttpRpcClient {
     pub fn get_tip_block_number(&mut self) -> BlockNumber;
     pub fn get_tip_header(&mut self) -> HeaderView;
     pub fn get_transaction(&mut self, hash: H256) -> Option<TransactionWithStatus>;
+    pub fn get_blockchain_info(&mut self) -> ChainInfo;
 
     // Pool
 });
@@ -131,6 +132,11 @@ impl HttpRpcClient {
     pub fn get_transaction(&mut self, hash: H256) -> Result<Option<TransactionWithStatus>, String> {
         self.client
             .get_transaction(hash)
+            .map_err(|err| err.to_string())
+    }
+    pub fn get_blockchain_info(&mut self) -> Result<ChainInfo, String> {
+        self.client
+            .get_blockchain_info()
             .map_err(|err| err.to_string())
     }
 }

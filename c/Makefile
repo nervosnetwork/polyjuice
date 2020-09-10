@@ -85,4 +85,4 @@ clean:
 	cd deps/secp256k1 && [ -f "Makefile" ] && make clean
 
 clean-bin:
-	rm -rf build/generator_test build/generator build/validator
+	rm -rf build/generator_test build/generator build/validator build/validator_log

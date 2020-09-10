@@ -57,7 +57,8 @@ if [ ! -f ${INTEGRATION_ROOT}/${CKB_CLI_TAR_FILENAME} ]; then
     tar -xzf ${INTEGRATION_ROOT}/${CKB_CLI_TAR_FILENAME}
 fi
 
-cp ${INTEGRATION_ROOT}/ckb-cli_${CKB_CLI_VERSION}_x86_64-unknown-linux-gnu/ckb-cli ${INTEGRATION_ROOT}
+# FIXME: remove this later
+# cp ${INTEGRATION_ROOT}/ckb-cli_${CKB_CLI_VERSION}_x86_64-unknown-linux-gnu/ckb-cli ${INTEGRATION_ROOT}
 ckb-cli --version
 
 # Build c contracts
@@ -161,7 +162,9 @@ if [ -f "${POLYJUICE_PID}" ]; then
     rm ${POLYJUICE_PID}
 fi
 rm -rf data
-RUST_LOG=info,polyjuice=debug polyjuice run \
+export RUST_BACKTRACE=full
+export RUST_LOG=info,polyjuice=debug
+polyjuice run \
         --generator ${PROJECT_ROOT}/c/build/generator \
         --db ${INTEGRATION_ROOT}/data \
         --config ${INTEGRATION_ROOT}/run_config.json \
@@ -174,7 +177,7 @@ sleep 3
 rm -rf ${INTEGRATION_ROOT}/contract-files
 mkdir -p ${INTEGRATION_ROOT}/contract-files
 cd ${PROJECT_ROOT}
-python ./tests/test.py ${INTEGRATION_ROOT}/contract-files ${CKB_BIN} ${API_URL} ${POLYJUICE_URL}
+python3 ./tests/test.py ${INTEGRATION_ROOT}/contract-files ${CKB_BIN} ${API_URL} ${POLYJUICE_URL}
 
 # Clean up
 kill -9 `cat ${CKB_PID}`

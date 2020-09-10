@@ -6,6 +6,8 @@ import sys
 import os
 import subprocess
 import time
+from binascii import unhexlify
+import hashlib
 
 if len(sys.argv) < 4 or len(sys.argv) > 5:
     print("USAGE:\n    python {} <json-dir> <ckb-binary-path> <ckb-rpc-url> <polyjuice-rpc>".format(sys.argv[0]))
@@ -16,6 +18,7 @@ SENDER1_PRIVKEY = "d00c06bfd800d27397002dca6fb0993d5ba6399b4238b2f29ee9deb97593d
 SENDER2 = "0x89750ca24e601604336276291d8b70280804d783"
 ADDRESS2 = "ckt1qyqgjagv5f8xq9syxd38v2ga3dczszqy67psu2y8r4"
 SENDER2_PRIVKEY = "3066aa42bfa95c6d033edfad9d1efb871991fd26f56270fedc171559823bee77"
+eoa_accounts = {}
 target_dir = sys.argv[1]
 ckb_bin_path = sys.argv[2]
 ckb_rpc_url = sys.argv[3]
@@ -69,6 +72,19 @@ def to_uint(number):
     output = hex(number)[2:]
     return '0' * (64 - len(output)) + output
 
+def ckb_blake2b(data_list):
+    data_bin = b""
+    for data in data_list:
+        if isinstance(data, str):
+            if data.startswith("0x"):
+                data_bin += unhexlify(data[2:])
+            else:
+                data_bin += unhexlify(data)
+        else:
+            data_bin += data
+    return hashlib.blake2b(data_bin, digest_size=32, person=b"ckb-default-hash").hexdigest()
+
+
 def send_jsonrpc(method, params):
     payload = {
         "id": 0,
@@ -77,38 +93,52 @@ def send_jsonrpc(method, params):
         "params": params,
     }
     cmd = "curl -s -H 'content-type: application/json' -d '{}' {}".format(json.dumps(payload), polyjuice_rpc_url)
-    output = subprocess.check_output(cmd, shell=True).strip().decode("utf-8")
+    output = run_cmd(cmd, print_output=False)
     resp = json.loads(output)
     if "error" in resp:
-        print("JSONRPC ERROR: {}".format(resp["error"]))
-        exit(-1)
+        raise ValueError("JSONRPC ERROR: {}".format(resp["error"]))
     return resp["result"]
 
-def create_contract(binary, constructor_args="", sender=SENDER1, value=0):
+def create_contract(binary, constructor_args="", sender=SENDER1, account_index=0, value=0):
+    eoa_account = eoa_accounts[sender][account_index]
     print("[create contract]:")
     print("  sender = {}".format(sender))
+    print("  account = {}".format(eoa_account))
     print("  binary = 0x{}".format(binary))
     print("    args = 0x{}".format(constructor_args))
     print("   value = {}".format(value))
-    result = send_jsonrpc("create", [sender, "0x{}{}".format(binary, constructor_args), value])
+    result = send_jsonrpc("create", [eoa_account, "0x{}{}".format(binary, constructor_args), value])
     print("  >> created address = {}".format(result["entrance_contract"]))
     return result
 
-def call_contract(contract_address, args, is_static=False, sender=SENDER1, value=0):
+def call_contract(contract_address, args, is_static=False, sender=SENDER1, account_index=0, value=0):
     method = "static_call" if is_static else "call"
+    eoa_account = eoa_accounts[sender][account_index]
     print("[{} contract]:".format(method))
-    print("   sender = {}".format(sender))
+    print("   sender = {}[{}]".format(sender, account_index))
+    print("  account = {}".format(eoa_account))
     print("  address = {}".format(contract_address))
     print("     args = {}".format(args))
     print("    value = {}".format(value))
-    params = [sender, contract_address, args]
+    params = [eoa_account, contract_address, args]
     if not is_static:
         params.append(value)
     return send_jsonrpc(method, params)
 
 def run_cmd(cmd, print_output=True):
     print("[RUN]: {}".format(cmd))
-    output = subprocess.check_output(cmd, shell=True, env=os.environ).strip().decode("utf-8")
+    try:
+        output = subprocess.check_output(
+            cmd,
+            shell=True,
+            env=os.environ,
+            stderr=subprocess.STDOUT,
+        ).strip().decode("utf-8")
+    except subprocess.CalledProcessError as e:
+        print("[output]:")
+        print(e.output)
+        raise e
+
     if print_output:
         print("[Output]: {}".format(output))
     return output
@@ -130,11 +160,16 @@ def commit_tx(result, action_name, privkey_path=privkey1_path):
     for retry in range(3):
         tx_hash = run_cmd("ckb-cli tx send --tx-file {} --skip-check".format(tx_path)).strip()
         mine_blocks()
-        tx_content = run_cmd("ckb-cli rpc get_transaction --hash {}".format(tx_hash), print_output=False)
-        if tx_content.find(tx_hash) > -1:
-            print("Transaction sent: {}".format(tx_hash))
-            break;
+        try:
+            tx_content = run_cmd("ckb-cli rpc get_transaction --hash {}".format(tx_hash), print_output=False)
+            if tx_content.find(tx_hash) > -1:
+                print("Transaction sent: {}".format(tx_hash))
+                break;
+        except subprocess.CalledProcessError:
+            pass
         print("Retry send transaction: {}".format(retry))
+    # Wait polyjuice to index the transaction
+    time.sleep(0.8)
 
 def create_contract_by_name(name, constructor_args="", value=0):
     result = create_contract(contracts_binary[name], constructor_args, value=value)
@@ -172,7 +207,7 @@ def test_log_events():
 def test_self_destruct():
     contract_name = SELF_DESTRUCT
     print("[Start]: {}\n".format(contract_name))
-    contract_address = create_contract_by_name(contract_name, "000000000000000000000000b2e61ff569acf041b3c2c17724e2379c581eeac3")
+    contract_address = create_contract_by_name(contract_name, addr_to_arg(eoa_accounts[SENDER2][0]))
 
     args = "0xae8421e1"
     result = call_contract(contract_address, args)
@@ -186,35 +221,37 @@ def test_erc20():
     print("[Start]: {}\n".format(contract_name))
     contract_address = create_contract_by_name(contract_name)
 
+    eoa1 = addr_to_arg(eoa_accounts[SENDER1][0])
+    eoa2 = addr_to_arg(eoa_accounts[SENDER2][0])
+    eoa3 = addr_to_arg(eoa_accounts[SENDER2][1])
     for (args, is_static, return_data) in [
-            # balanceOf(c8328aabcd9b9e8e64fbc566c4385c3bdeb219d7)
-            ("0x70a08231000000000000000000000000c8328aabcd9b9e8e64fbc566c4385c3bdeb219d7", True, "0x000000000000000000000000000000000000000204fce5e3e250261100000000"),
+            # balanceOf(c8328aabcd9b9e8e64fbc566c4385c3bdeb219d7[0])
+            ("0x70a08231{}".format(eoa1), True, "0x000000000000000000000000000000000000000204fce5e3e250261100000000"),
 
-            # balanceOf(d4c85f3cb8a625d25febb5acdade5e5bf4824fda)
-            ("0x70a08231000000000000000000000000d4c85f3cb8a625d25febb5acdade5e5bf4824fda", True, "0x0000000000000000000000000000000000000000000000000000000000000000"),
-            # transfer("d4c85f3cb8a625d25febb5acdade5e5bf4824fda", 0x22b)
-            ("0xa9059cbb000000000000000000000000d4c85f3cb8a625d25febb5acdade5e5bf4824fda000000000000000000000000000000000000000000000000000000000000022b", False, None),
-            # balanceOf(d4c85f3cb8a625d25febb5acdade5e5bf4824fda)
-            ("0x70a08231000000000000000000000000d4c85f3cb8a625d25febb5acdade5e5bf4824fda", True, "0x000000000000000000000000000000000000000000000000000000000000022b"),
-            # transfer("d4c85f3cb8a625d25febb5acdade5e5bf4824fda", 0x219)
-            ("0xa9059cbb000000000000000000000000d4c85f3cb8a625d25febb5acdade5e5bf4824fda0000000000000000000000000000000000000000000000000000000000000219", False, None),
-            # balanceOf(d4c85f3cb8a625d25febb5acdade5e5bf4824fda)
-            ("0x70a08231000000000000000000000000d4c85f3cb8a625d25febb5acdade5e5bf4824fda", True, "0x0000000000000000000000000000000000000000000000000000000000000444"),
+            # balanceOf(89750ca24e601604336276291d8b70280804d783[0])
+            ("0x70a08231{}".format(eoa2), True, "0x0000000000000000000000000000000000000000000000000000000000000000"),
+            # transfer("89750ca24e601604336276291d8b70280804d783[0]", 0x22b)
+            ("0xa9059cbb{}000000000000000000000000000000000000000000000000000000000000022b".format(eoa2), False, None),
+            # balanceOf(89750ca24e601604336276291d8b70280804d783[0])
+            ("0x70a08231{}".format(eoa2), True, "0x000000000000000000000000000000000000000000000000000000000000022b"),
+            # transfer("89750ca24e601604336276291d8b70280804d783[0]", 0x219)
+            ("0xa9059cbb{}0000000000000000000000000000000000000000000000000000000000000219".format(eoa2), False, None),
+            # balanceOf(89750ca24e601604336276291d8b70280804d783[0])
+            ("0x70a08231{}".format(eoa2), True, "0x0000000000000000000000000000000000000000000000000000000000000444"),
 
             # burn(8908)
             ("0x42966c6800000000000000000000000000000000000000000000000000000000000022cc", False, None),
-            # balanceOf(c8328aabcd9b9e8e64fbc566c4385c3bdeb219d7)
-            ("0x70a08231000000000000000000000000c8328aabcd9b9e8e64fbc566c4385c3bdeb219d7", True, "0x000000000000000000000000000000000000000204fce5e3e2502610ffffd8f0"),
+            # balanceOf(c8328aabcd9b9e8e64fbc566c4385c3bdeb219d7[0])
+            ("0x70a08231{}".format(eoa1), True, "0x000000000000000000000000000000000000000204fce5e3e2502610ffffd8f0"),
 
-            # approve(89750ca24e601604336276291d8b70280804d783, 0x3e8)
-            ("0x095ea7b300000000000000000000000089750ca24e601604336276291d8b70280804d78300000000000000000000000000000000000000000000000000000000000003e8", False, None),
+            # approve(89750ca24e601604336276291d8b70280804d783[1], 0x3e8)
+            ("0x095ea7b3{}00000000000000000000000000000000000000000000000000000000000003e8".format(eoa3), False, None),
     ]:
         result = call_contract(contract_address, args, is_static)
         if is_static:
             print("static call result: {}".format(result))
             if result["return_data"] != return_data:
-                print("Invalid return data")
-                exit(-1)
+                raise ValueError("Invalid return data")
         else:
             action_name = "call-{}-{}-{}".format(contract_name, contract_address, args)
             commit_tx(result, action_name)
@@ -222,9 +259,9 @@ def test_erc20():
     cmd = "ckb-cli --wait-for-sync wallet transfer --privkey-path {} --to-address {} --capacity 500 --tx-fee 0.001".format(privkey1_path, ADDRESS2)
     run_cmd(cmd)
     mine_blocks()
-    # transferFrom(89750ca24e601604336276291d8b70280804d783, d4c85f3cb8a625d25febb5acdade5e5bf4824fda, 0x3e8)
-    args = "0x23b872dd000000000000000000000000c8328aabcd9b9e8e64fbc566c4385c3bdeb219d7000000000000000000000000d4c85f3cb8a625d25febb5acdade5e5bf4824fda00000000000000000000000000000000000000000000000000000000000003e8"
-    result = call_contract(contract_address, args, is_static, sender=SENDER2)
+    # transferFrom(c8328aabcd9b9e8e64fbc566c4385c3bdeb219d7[0], 89750ca24e601604336276291d8b70280804d783[0], 0x3e8)
+    args = "0x23b872dd{}{}00000000000000000000000000000000000000000000000000000000000003e8".format(eoa1, eoa2)
+    result = call_contract(contract_address, args, sender=SENDER2, account_index=1)
     action_name = "call-{}-{}-{}".format(contract_name, contract_address, args)
     commit_tx(result, action_name[:42], privkey_path=privkey2_path)
 
@@ -301,16 +338,25 @@ def test_call_selfdestruct():
     contract_name = CALL_SELFDESTRUCT
     print("[Start]: {}\n".format(contract_name))
 
-    destruct_address = create_contract_by_name(SELF_DESTRUCT, "000000000000000000000000b2e61ff569acf041b3c2c17724e2379c581eeac3")
+    beneficiary_addr = eoa_accounts[SENDER2][0]
+    destruct_address = create_contract_by_name(SELF_DESTRUCT, addr_to_arg(beneficiary_addr))
     contract_address = create_contract_by_name(contract_name)
 
     call_args = "0x9a33d968000000000000000000000000{}".format(destruct_address[2:])
     result = call_contract(contract_address, call_args)
     action_name = "call-{}-{}-{}".format(contract_name, contract_address, call_args)
+    old_balance = send_jsonrpc("get_balance", [beneficiary_addr])
     commit_tx(result, action_name[:42])
+    new_balance = send_jsonrpc("get_balance", [beneficiary_addr])
+    assert new_balance - old_balance == 15800000000
     target_output = result["tx"]["outputs"][1]
-    assert target_output["lock"]["args"] == "0xb2e61ff569acf041b3c2c17724e2379c581eeac3", "beneficiary address not match"
-    assert target_output["type"] is None, "beneficiary type script not null"
+    assert target_output["lock"]["args"] == SENDER2, "beneficiary address not match"
+    hash_value = ckb_blake2b([target_output["type"]["args"], target_output["lock"]["args"]])
+    print("[type_args] : {}".format(target_output["type"]["args"]))
+    print("[lock_args] : {}".format(target_output["lock"]["args"]))
+    print("[hash_value]: {}".format(hash_value))
+    print("[sender2[0]]: {}".format(eoa_accounts[SENDER2][0]))
+    assert hash_value[0:40] == eoa_accounts[SENDER2][0][2:], "beneficiary eoa address is wrong"
     print("[Finish]: {}\n".format(contract_name))
 
 def test_get_block_info():
@@ -391,17 +437,68 @@ def test_simple_transfer():
     contract_name = SIMPLE_TRANSFER
     print("[Start]: {}\n".format(contract_name))
     contract_address = create_contract_by_name(contract_name, value=3)
+    assert send_jsonrpc("get_balance", [contract_address]) == 3
 
     ss_address = create_contract_by_name(SIMPLE_STORAGE)
     print("create SimpleStorage contract({}) for {}".format(ss_address, contract_name))
+
+    def check_balance(fn, to_addr, contract_delta=0, value=0):
+        args = fn + addr_to_arg(to_addr)
+        result = call_contract(contract_address, args, value=value)
+        action_name = "call-{}-{}-{}".format(contract_name, contract_address, args)
+        old_contract_balance = send_jsonrpc("get_balance", [contract_address])
+        old_balance = send_jsonrpc("get_balance", [to_addr])
+        commit_tx(result, action_name)
+        new_balance = send_jsonrpc("get_balance", [to_addr])
+        new_contract_balance = send_jsonrpc("get_balance", [contract_address])
+        print('to-addr={} old-balance={}, new-balance={}'.format(to_addr, old_balance, new_balance))
+        assert (new_balance - old_balance) == 1
+        contract_balance = send_jsonrpc("get_balance", [contract_address])
+        print('contract.balance={}'.format(contract_balance))
+        assert old_contract_balance - new_contract_balance == contract_delta
+
     fn_transfer_to = "0xa03fa7e3"
-    args = fn_transfer_to + addr_to_arg(ss_address)
-    result = call_contract(contract_address, args)
-    action_name = "call-{}-{}-{}".format(contract_name, contract_address, args)
-    commit_tx(result, action_name)
+    fn_transfer_to_ss1 = "0xf10c7360"
+    fn_transfer_to_ss2 = "0x2a5eb963"
+    # Transfer to EoA address
+    check_balance(fn_transfer_to, eoa_accounts[SENDER2][1], contract_delta=1)
+    check_balance(fn_transfer_to, eoa_accounts[SENDER2][1], value=1)
+    # Transfer to contract address (storage unchanged)
+    check_balance(fn_transfer_to, ss_address, contract_delta=1)
+    check_balance(fn_transfer_to, ss_address, value=1)
+    # Transfer to contract and change target contract's storage
+    check_balance(fn_transfer_to_ss1, ss_address, value=1)
+    check_balance(fn_transfer_to_ss2, ss_address, value=1)
+
+    # Check the final address's balance
+    assert send_jsonrpc("get_balance", [contract_address]) == 1
+
     print("[Finish]: {}\n".format(contract_name))
 
+
+def gen_eoa_accounts():
+    run_cmd("ckb-cli wallet transfer --privkey-path {} --to-address {} --capacity 200000 --tx-fee 0.0001".format(privkey1_path, ADDRESS2))
+    mine_blocks()
+    for (sender, privkey_path, balance) in [
+            (SENDER1, privkey1_path, 100000),
+            (SENDER2, privkey2_path, 10000),
+            (SENDER2, privkey2_path, 100),
+    ]:
+        output = run_cmd("polyjuice new-eoa-account --url {} -k {} --balance {}".format(
+            ckb_rpc_url, privkey_path, balance,
+        ))
+        eoa_address = output.strip().splitlines()[-1]
+        mine_blocks()
+        if sender not in eoa_accounts:
+            eoa_accounts[sender] = []
+        eoa_accounts[sender].append(eoa_address)
+
+
 def main():
+    ## Generate EoA accounts
+    gen_eoa_accounts()
+
+    ## Run Test cases
     test_simple_storage()
     test_log_events()
     test_self_destruct()

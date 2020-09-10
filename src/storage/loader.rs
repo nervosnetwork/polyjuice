@@ -73,6 +73,8 @@ impl Loader {
         ))
     }
 
+    // TODO: remove #[allow(unused)] later
+    #[allow(unused)]
     pub fn collect_cells(
         &mut self,
         sender: EoaAddress,
@@ -180,7 +182,7 @@ impl Loader {
             .map(|number| number + 1)
             .unwrap_or(std::u64::MAX);
         let last_key = Key::ContractChange {
-            address,
+            address: address.clone(),
             number: Some(next_block_number),
             tx_index: None,
             output_index: None,
@@ -239,7 +241,7 @@ impl Loader {
                 logs,
             });
         }
-        Err(String::from("Latest contract change not found"))
+        Err(format!("Latest contract change not found: {:x}", address.0))
     }
 
     pub fn load_contract_meta_list(

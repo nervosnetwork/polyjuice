@@ -17,7 +17,7 @@ use std::convert::TryFrom;
 use crate::storage::{value, Key};
 
 pub const ONE_CKB: u64 = 100_000_000;
-pub const MIN_CELL_CAPACITY: u64 = 61 * ONE_CKB;
+// pub const MIN_CELL_CAPACITY: u64 = 61 * ONE_CKB;
 
 pub const SIGHASH_TYPE_HASH: H256 =
     h256!("0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8");
@@ -106,14 +106,24 @@ pub struct WitnessData {
     /// The return data (for read by other contract when contract call contract)
     pub return_data: Bytes,
     /// The call's selfdestruct target
-    pub selfdestruct: Option<H160>,
+    pub selfdestruct: Option<(H160, u64)>,
     /// For verify every contract have exact number of programs in specific
     /// positions
-    pub calls: Vec<(ContractAddress, u32)>,
+    pub calls: Vec<CallRecord>,
     /// The data required to read and verify coinbase, only in entrance program
     pub coinbase: Option<Coinbase>,
     /// Provide storage diff and diff proofs.
     pub run_proof: Bytes,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CallRecord {
+    pub destination: H160,
+    pub program_index: u32,
+    pub value: u64,
+    pub transfer_only: bool,
+    // destination is EoA account
+    pub is_eoa: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -161,9 +171,9 @@ pub struct Program {
     /// The sender of the message. (MUST be verified by the signature in witness data)
     pub sender: H160,
     /// The destination of the message (MUST be verified by the script args).
-    pub destination: ContractAddress,
+    pub destination: H160,
     /// The value transfer into the destination contract
-    pub value: u128,
+    pub value: u64,
     /// The code to create/call the contract
     pub code: Bytes,
     /// The input data to create/call the contract
@@ -179,7 +189,7 @@ pub struct ContractMeta {
     /// The output index of the transaction where the contract created
     pub output_index: u32,
     /// The balance of the contract
-    pub balance: u128,
+    pub balance: u64,
     pub destructed: bool,
 }
 
@@ -370,14 +380,14 @@ impl Coinbase {
 }
 
 impl Program {
-    pub fn new_create(tx_origin: EoaAddress, sender: H160, code: Bytes, value: u128) -> Program {
+    pub fn new_create(tx_origin: EoaAddress, sender: H160, code: Bytes, value: u64) -> Program {
         Program {
             kind: CallKind::CREATE,
             flags: 0,
             depth: 0,
             tx_origin,
             sender,
-            destination: ContractAddress::default(),
+            destination: H160::default(),
             code,
             input: Bytes::default(),
             value,
@@ -387,10 +397,10 @@ impl Program {
     pub fn new_call(
         tx_origin: EoaAddress,
         sender: H160,
-        destination: ContractAddress,
+        destination: H160,
         code: Bytes,
         input: Bytes,
-        value: u128,
+        value: u64,
         is_static: bool,
     ) -> Program {
         let flags = if is_static { 1 } else { 0 };
@@ -407,6 +417,10 @@ impl Program {
         }
     }
 
+    pub fn is_transfer_only(&self) -> bool {
+        !self.is_create() && self.input.is_empty()
+    }
+
     pub fn is_create(&self) -> bool {
         self.kind.is_create()
     }
@@ -418,7 +432,7 @@ impl Program {
         buf.put(&self.depth.to_le_bytes()[..]);
         buf.put(self.tx_origin.0.as_bytes());
         buf.put(self.sender.as_bytes());
-        buf.put(self.destination.0.as_bytes());
+        buf.put(self.destination.as_bytes());
         let value = U256::from(self.value);
         buf.put(&value.to_be_bytes()[..]);
 
@@ -447,7 +461,7 @@ impl TryFrom<&[u8]> for Program {
         let depth = load_u32(data, &mut offset)?;
         let tx_origin = EoaAddress(load_h160(data, &mut offset)?);
         let sender = load_h160(data, &mut offset)?;
-        let destination = ContractAddress(load_h160(data, &mut offset)?);
+        let destination = load_h160(data, &mut offset)?;
         let value = load_u256(data, &mut offset)?;
         let code = load_var_slice(data, &mut offset)?;
         let input = load_var_slice(data, &mut offset)?;
@@ -463,7 +477,7 @@ impl TryFrom<&[u8]> for Program {
             tx_origin,
             sender,
             destination,
-            value: u128::from_le_bytes(value_u128.to_le_bytes()),
+            value: u128::from_le_bytes(value_u128.to_le_bytes()) as u64,
             code: Bytes::from(code.to_vec()),
             input: Bytes::from(input.to_vec()),
         })
@@ -503,17 +517,33 @@ impl WitnessData {
             let program = Program::try_from(program_slice)?;
             let return_data = load_var_slice(program_data, &mut inner_offset)?;
             let selfdestruct_target = load_h160(program_data, &mut inner_offset)?;
+            let selfdestruct_value = load_u64(program_data, &mut inner_offset)?;
             let selfdestruct = if selfdestruct_target == H160::default() {
                 None
             } else {
-                Some(selfdestruct_target)
+                Some((selfdestruct_target, selfdestruct_value))
             };
             let mut calls = Vec::new();
             let calls_len = load_u32(program_data, &mut inner_offset)?;
             for _ in 0..calls_len {
-                let contract_address = load_h160(program_data, &mut inner_offset)?;
+                let destination = load_h160(program_data, &mut inner_offset)?;
                 let program_index = load_u32(program_data, &mut inner_offset)?;
-                calls.push((ContractAddress(contract_address), program_index));
+                let value = load_u64(program_data, &mut inner_offset)?;
+                let transfer_only = load_u8(program_data, &mut inner_offset)?;
+                let is_eoa = load_u8(program_data, &mut inner_offset)?;
+                if transfer_only != 1 && transfer_only != 0 {
+                    return Err(format!("Invalid transfer_only value: {}", transfer_only));
+                }
+                if is_eoa != 1 && is_eoa != 0 {
+                    return Err(format!("Invalid is_eoa value: {}", is_eoa));
+                }
+                calls.push(CallRecord {
+                    destination,
+                    program_index,
+                    value,
+                    transfer_only: transfer_only == 1,
+                    is_eoa: is_eoa == 1,
+                });
             }
             let coinbase_bytes = load_var_slice(program_data, &mut inner_offset)?;
             let coinbase = if !coinbase_bytes.is_empty() {
@@ -591,12 +621,25 @@ impl WitnessData {
         buf.put(&(self.return_data.len() as u32).to_le_bytes()[..]);
         buf.put(self.return_data.as_ref());
         // selfdestruct beneficiary: H160
-        buf.put(self.selfdestruct.clone().unwrap_or_default().as_bytes());
+        buf.put(self.selfdestruct.clone().unwrap_or_default().0.as_bytes());
+        buf.put(
+            &self
+                .selfdestruct
+                .clone()
+                .unwrap_or_default()
+                .1
+                .to_le_bytes()[..],
+        );
         // calls: Vec<(H160, u32)>
         buf.put(&(self.calls.len() as u32).to_le_bytes()[..]);
-        for (contract_address, program_index) in &self.calls {
-            buf.put(contract_address.0.as_bytes());
-            buf.put(&program_index.to_le_bytes()[..]);
+        for call_record in &self.calls {
+            buf.put(call_record.destination.as_bytes());
+            buf.put(&call_record.program_index.to_le_bytes()[..]);
+            buf.put(&call_record.value.to_le_bytes()[..]);
+            let transfer_only: u8 = if call_record.transfer_only { 1 } else { 0 };
+            let is_eoa = if call_record.is_eoa { 1 } else { 0 };
+            buf.put(&[transfer_only][..]);
+            buf.put(&[is_eoa][..]);
         }
         let coinbase_bytes = self
             .coinbase
@@ -701,6 +744,21 @@ pub fn contract_account_balance(output: &packed::CellOutput) -> u64 {
     cell_balance(output, (32 + 32) * ONE_CKB)
 }
 
+pub fn load_u8(data: &[u8], offset: &mut usize) -> Result<u8, String> {
+    let offset_value = *offset;
+    if data[offset_value..].is_empty() {
+        return Err(format!(
+            "Not enough data length to parse u32: data.len={}, offset={}",
+            data.len(),
+            offset
+        ));
+    }
+    let value = data[offset_value];
+    log::trace!("[load] u8  : offset={:>3}, value ={:>3}", offset, value);
+    *offset += 1;
+    Ok(value)
+}
+
 pub fn load_u32(data: &[u8], offset: &mut usize) -> Result<u32, String> {
     let offset_value = *offset;
     if data[offset_value..].len() < 4 {
@@ -720,6 +778,28 @@ pub fn load_u32(data: &[u8], offset: &mut usize) -> Result<u32, String> {
         hex::encode(&buf[..])
     );
     *offset += 4;
+    Ok(value)
+}
+
+pub fn load_u64(data: &[u8], offset: &mut usize) -> Result<u64, String> {
+    let offset_value = *offset;
+    if data[offset_value..].len() < 8 {
+        return Err(format!(
+            "Not enough data length to parse u64: data.len={}, offset={}",
+            data.len(),
+            offset
+        ));
+    }
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&data[offset_value..offset_value + 8]);
+    let value = u64::from_le_bytes(buf);
+    log::trace!(
+        "[load] u64  : offset={:>3}, value ={:>3}, slice={}",
+        offset,
+        value,
+        hex::encode(&buf[..])
+    );
+    *offset += 8;
     Ok(value)
 }
 

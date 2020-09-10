@@ -28,9 +28,10 @@ jsonrpc-http-server = "14.0"
 ckb-vm = { version = "0.19.1", features = ["asm"] }
 numext-fixed-uint = { version = "0.1", features = ["support_rand", "support_heapsize", "support_serde"] }
 sparse-merkle-tree = "0.3"
-ckb-hash = { git = "https://github.com/nervosnetwork/ckb", tag = "v0.31.0-pre1" }
-ckb-types = { git = "https://github.com/nervosnetwork/ckb", tag = "v0.31.0-pre1" }
-ckb-chain-spec = { git = "https://github.com/nervosnetwork/ckb", tag = "v0.31.0-pre1" }
-ckb-jsonrpc-types = { git = "https://github.com/nervosnetwork/ckb", tag = "v0.31.0-pre1" }
+ckb-sdk = { git = "https://github.com/nervosnetwork/ckb-cli", tag = "v0.35.0" }
+ckb-hash = { git = "https://github.com/nervosnetwork/ckb", tag = "v0.35.0-rc1" }
+ckb-types = { git = "https://github.com/nervosnetwork/ckb", tag = "v0.35.0-rc1" }
+ckb-chain-spec = { git = "https://github.com/nervosnetwork/ckb", tag = "v0.35.0-rc1" }
+ckb-jsonrpc-types = { git = "https://github.com/nervosnetwork/ckb", tag = "v0.35.0-rc1" }
 # ckb-simple-account-layer = { git = "https://github.com/nervosnetwork/ckb-simple-account-layer", rev = "83f20d9" }
-ckb-simple-account-layer = { git = "https://github.com/TheWaWaR/ckb-simple-account-layer.git", rev = "3a2937c46ad65e90ec2389e3da088fd89e7fba53" }
+ckb-simple-account-layer = { git = "https://github.com/TheWaWaR/ckb-simple-account-layer.git", rev = "9a062193780f8ec88b7f3555ec744ffaa8b194f8" }

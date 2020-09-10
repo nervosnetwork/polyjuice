@@ -355,7 +355,7 @@ pub mod value {
         /// The output index of the transaction where the contract created
         pub output_index: u32,
         /// The balance of the contract
-        pub balance: u128,
+        pub balance: u64,
         /// Check if the contract is destructed
         pub destructed: bool,
     }
@@ -376,8 +376,8 @@ pub mod value {
     pub struct EoaLiveCell {
         pub tx_hash: H256,
         pub output_index: u32,
-        pub capacity: u64,
-        pub balance: u64,
+        capacity: u64,
+        balance: u64,
     }
 
     impl LockLiveCell {
@@ -386,8 +386,35 @@ pub mod value {
         }
     }
     impl EoaLiveCell {
+        pub fn new(tx_hash: H256, output_index: u32, capacity: u64, balance: u64) -> EoaLiveCell {
+            EoaLiveCell {
+                tx_hash,
+                output_index,
+                capacity,
+                balance,
+            }
+        }
         pub fn out_point(&self) -> packed::OutPoint {
             packed::OutPoint::new(self.tx_hash.pack(), self.output_index)
+        }
+        pub fn sub_balance(&mut self, value: u64) -> Result<(), String> {
+            if self.balance < value {
+                return Err(format!("balance not enough: {} < {}", self.balance, value));
+            } else {
+                self.balance -= value;
+                self.capacity -= value;
+            }
+            Ok(())
+        }
+        pub fn add_balance(&mut self, value: u64) {
+            self.balance += value;
+            self.capacity += value;
+        }
+        pub fn capacity(&self) -> u64 {
+            self.capacity
+        }
+        pub fn balance(&self) -> u64 {
+            self.balance
         }
     }
 

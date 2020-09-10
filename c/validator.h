@@ -88,8 +88,8 @@ static void debug_print_data_impl(const char *prefix,
   debug_buffer[offset] = '\0';
   ckb_debug(debug_buffer);
 }
-static void debug_print_int_impl(const char *prefix, int ret) {
-  sprintf(debug_buffer, "%s => %d", prefix, ret);
+static void debug_print_int_impl(const char *prefix, long int ret) {
+  sprintf(debug_buffer, "%s => %ld", prefix, ret);
   ckb_debug(debug_buffer);
 }
 #else  /* #ifdef LONG_DEBUG_LOG */
@@ -108,8 +108,8 @@ static void debug_print_data_impl(const char *prefix, const uint8_t *data, uint3
     ckb_debug(debug_buffer);
   }
 }
-static void debug_print_int_impl(const char *prefix, int ret) {
-  sprintf(debug_buffer, "%s => %d", prefix, ret);
+static void debug_print_int_impl(const char *prefix, long int ret) {
+  sprintf(debug_buffer, "%s => %ld", prefix, ret);
   ckb_debug(debug_buffer);
 }
 #endif  /* #ifdef LONG_DEBUG_LOG */

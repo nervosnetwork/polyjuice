@@ -26,9 +26,9 @@ use super::{db_get, value, Key, Loader};
 use crate::client::HttpRpcClient;
 use crate::types::{
     cell_balance, contract_account_balance, h256_to_smth256, parse_log, smth256_to_h256,
-    vm_load_data, vm_load_h160, vm_load_h256, vm_load_i32, vm_load_i64, vm_load_u32, vm_load_u8,
-    CallKind, ContractAddress, ContractChange, ContractMeta, EoaAddress, RunConfig, WitnessData,
-    ONE_CKB,
+    vm_load_data, vm_load_h160, vm_load_h256, vm_load_i32, vm_load_i64, vm_load_u256, vm_load_u32,
+    vm_load_u8, CallKind, ContractAddress, ContractChange, ContractMeta, EoaAddress, RunConfig,
+    WitnessData, ONE_CKB,
 };
 
 pub const TYPE_ARGS_LEN: usize = 20;
@@ -193,7 +193,7 @@ impl Indexer {
                         continue;
                     }
                     Ok(None) => {
-                        // Reach the tip, wait 200ms for next block
+                        // Reach the tip, wait 50ms for next block
                         sleep(Duration::from_millis(50));
                         // TODO: clean up OLD block delta here (before tip-200)
                         continue;
@@ -240,8 +240,8 @@ impl Indexer {
             let mut block_codes: Vec<ContractMeta> = Vec::new();
             let mut destructed_contracts: Vec<ContractAddress> = Vec::new();
 
-            let mut eoa_added_cells: HashSet<(H160, value::EoaLiveCell)> = HashSet::new();
-            let mut eoa_removed_cells: HashSet<(H160, value::EoaLiveCell)> = HashSet::new();
+            let mut eoa_added_cells: HashMap<H160, value::EoaLiveCell> = HashMap::new();
+            let mut eoa_removed_cells: HashMap<H160, value::EoaLiveCell> = HashMap::new();
             let mut added_cells: HashSet<(H256, u32, u32, value::LockLiveCell)> = HashSet::new();
             let mut removed_cells: HashSet<(H256, u64, u32, u32, value::LockLiveCell)> =
                 HashSet::new();
@@ -260,6 +260,7 @@ impl Indexer {
                 //   2. tx_hash
                 //   3. tx_index
                 let mut script_groups: HashMap<ContractAddress, ContractInfo> = HashMap::default();
+                let mut eoa_accounts: HashMap<H160, (u64, u64)> = HashMap::default();
 
                 for (input_index, input) in tx.inputs.into_iter().enumerate() {
                     // Information from input
@@ -312,7 +313,8 @@ impl Indexer {
                         let mut info = ContractInfo::default();
                         info.tree = change.merkle_tree();
                         info.input = Some((input_index, change));
-                        info.balance = info.init_balance();
+                        info.input_balance = info.init_balance();
+                        info.input_capacity = capacity;
                         script_groups.insert(address, info);
                     }
                     let out_point = packed::OutPoint::from(input.previous_output.clone());
@@ -353,7 +355,12 @@ impl Indexer {
                             &output,
                             output_data_size,
                         );
-                        eoa_removed_cells.insert((eoa_address, eoa_value));
+                        eoa_accounts.insert(eoa_address.clone(), (eoa_value.balance(), 0));
+                        if eoa_added_cells.contains_key(&eoa_address) {
+                            let _ = eoa_added_cells.remove(&eoa_address);
+                        } else {
+                            eoa_removed_cells.insert(eoa_address, eoa_value);
+                        }
                     }
                     block_removed_cells.insert(value.clone());
                     removed_cells.insert((
@@ -397,8 +404,11 @@ impl Indexer {
                         if info.output.is_some() {
                             panic!("multiple output contract address");
                         }
-                        info.output =
-                            Some((output_index, packed::CellOutput::from(output.clone())));
+                        let packed_output = packed::CellOutput::from(output.clone());
+                        info.output_balance =
+                            cell_balance(&packed_output, (data_size as u64) * ONE_CKB);
+                        info.output_capacity = output.capacity.value();
+                        info.output = Some((output_index, packed_output));
                     }
                     let lock_hash: H256 = packed::Script::from(output.lock.clone())
                         .calc_script_hash()
@@ -436,7 +446,14 @@ impl Indexer {
                             &output,
                             data_size,
                         );
-                        eoa_added_cells.insert((eoa_address, eoa_value));
+                        if eoa_removed_cells.contains_key(&eoa_address) {
+                            let _ = eoa_removed_cells.remove(&eoa_address);
+                            eoa_accounts
+                                .get_mut(&eoa_address)
+                                .expect("eoa not exists")
+                                .1 = eoa_value.balance();
+                        }
+                        eoa_added_cells.insert(eoa_address, eoa_value);
                     }
                     added_cells.insert((lock_hash, tx_index as u32, output_index as u32, value));
                 }
@@ -460,10 +477,10 @@ impl Indexer {
                         self.run_config.clone(),
                         tip_block,
                         header_deps,
-                        tx_hash,
-                        tx_index as u32,
+                        (tx_hash, tx_index as u32),
                         tx.witnesses,
                         script_groups,
+                        eoa_accounts,
                     )? {
                         extractor.run().map_err(|err| err.to_string())?;
                         block_changes.extend(extractor.get_contract_changes(next_number));
@@ -495,6 +512,15 @@ impl Indexer {
                 // Key::ContractChange
                 let db_value_bytes = serialize(&change.db_value()).unwrap();
                 batch.put(&Bytes::from(&change.db_key()), &db_value_bytes);
+                if !change.is_create {
+                    let meta_key_bytes = Bytes::from(&Key::ContractMeta(change.address.clone()));
+                    let mut meta: value::ContractMeta = db_get(&self.db, &meta_key_bytes)?
+                        .ok_or_else(|| format!("no such contract: {:x}", change.address.0))?;
+                    if meta.balance != change.balance {
+                        meta.balance = change.balance;
+                        batch.put(&meta_key_bytes, &serialize(&meta).unwrap());
+                    }
+                }
                 // Key::ContractLogs
                 if let Some(key_logs) = change.db_key_logs() {
                     let db_value_logs_bytes = serialize(&change.db_value_logs()).unwrap();
@@ -557,10 +583,12 @@ impl Indexer {
                 batch.delete(&Bytes::from(&Key::LiveCellMap(value.out_point())));
             }
             for (eoa_address, eoa_value) in eoa_added_cells.clone() {
+                log::debug!("add eoa account: {:x}", eoa_address);
                 let key = Key::EoaLiveCell(eoa_address);
                 batch.put(&Bytes::from(&key), &serialize(&eoa_value).unwrap());
             }
             for (eoa_address, _) in eoa_removed_cells.iter() {
+                log::debug!("remove eoa account: {:x}", eoa_address);
                 let key = Key::EoaLiveCell(eoa_address.clone());
                 batch.delete(&Bytes::from(&key));
             }
@@ -626,12 +654,12 @@ fn eoa_record(
     blake2b.finalize(&mut result);
     let eoa_address = H160::from_slice(&result[0..20]).expect("convert to h160");
     let packed_output = packed::CellOutput::from(output.clone());
-    let eoa_value = value::EoaLiveCell {
-        tx_hash: tx_hash.clone(),
+    let eoa_value = value::EoaLiveCell::new(
+        tx_hash.clone(),
         output_index,
-        capacity: output.capacity.value(),
-        balance: cell_balance(&packed_output, (data_size as u64) * ONE_CKB),
-    };
+        output.capacity.value(),
+        cell_balance(&packed_output, (data_size as u64) * ONE_CKB),
+    );
     (eoa_address, eoa_value)
 }
 
@@ -648,9 +676,12 @@ pub struct ContractExtractor {
     tx_index: u32,
     entrance_contract: ContractAddress,
     current_contract: ContractAddress,
+    tx_origin: EoaAddress,
 
     // script_hash => (input, output, programs)
     script_groups: HashMap<ContractAddress, ContractInfo>,
+    // EoA address => (input_balance, output_balance)
+    eoa_accounts: HashMap<H160, (u64, u64)>,
 }
 
 #[derive(Default)]
@@ -666,12 +697,16 @@ pub struct ContractInfo {
     logs: Vec<(Vec<H256>, Bytes)>,
     pub run_result: RunResult,
     selfdestruct: Option<Bytes>,
-    balance: u128,
+    input_balance: u64,
+    input_capacity: u64,
+    output_balance: u64,
+    output_capacity: u64,
     // Updated by ckb-vm
     tree: SparseMerkleTree<CkbBlake2bHasher, SmtH256, DefaultStore<SmtH256>>,
 }
 
 impl ContractInfo {
+    // aka current contract address
     pub fn selfdestruct(&self) -> Option<ContractAddress> {
         assert_eq!(
             self.output.is_none(),
@@ -684,6 +719,7 @@ impl ContractInfo {
             .selfdestruct
             .as_ref()
             .map(|_| last_program.program.destination.clone())
+            .map(ContractAddress)
     }
     pub fn is_create(&self) -> bool {
         self.input.is_none()
@@ -695,10 +731,10 @@ impl ContractInfo {
             self.programs[0].program.code.clone()
         }
     }
-    pub fn init_balance(&self) -> u128 {
+    pub fn init_balance(&self) -> u64 {
         self.input
             .as_ref()
-            .map(|(_, change)| change.balance as u128)
+            .map(|(_, change)| change.balance as u64)
             .unwrap_or_default()
     }
 
@@ -728,12 +764,13 @@ impl ContractInfo {
                 .as_ref()
                 .map(|(_, output)| contract_account_balance(output))
                 .unwrap();
+            log::debug!("get_meta({:x}) balance = {}", address.0, balance);
             Some(ContractMeta {
                 address: address.clone(),
                 code: self.code(),
                 tx_hash: tx_hash.clone(),
                 output_index,
-                balance: balance as u128,
+                balance,
                 destructed: false,
             })
         } else {
@@ -783,10 +820,10 @@ impl ContractExtractor {
         run_config: RunConfig,
         tip_block: core::BlockView,
         header_deps: HashMap<u64, core::HeaderView>,
-        tx_hash: H256,
-        tx_index: u32,
+        out_point: (H256, u32),
         witnesses: Vec<JsonBytes>,
         mut script_groups: HashMap<ContractAddress, ContractInfo>,
+        eoa_accounts: HashMap<H160, (u64, u64)>,
     ) -> Result<Option<ContractExtractor>, String> {
         let mut tx_origin = EoaAddress::default();
         let mut entrance_contract = None;
@@ -842,11 +879,13 @@ impl ContractExtractor {
                 run_config,
                 tip_block,
                 header_deps,
-                tx_hash,
-                tx_index,
+                tx_hash: out_point.0,
+                tx_index: out_point.1,
+                tx_origin,
                 entrance_contract,
                 current_contract,
                 script_groups,
+                eoa_accounts,
             }
         }))
     }
@@ -879,10 +918,8 @@ impl ContractExtractor {
             let program_data = if program.kind.is_special_call() {
                 let dest_info = self
                     .script_groups
-                    .get_mut(&program.destination)
-                    .ok_or_else(|| {
-                        format!("No such contract to run: {:x}", program.destination.0)
-                    })?;
+                    .get_mut(&ContractAddress(program.destination.clone()))
+                    .ok_or_else(|| format!("No such contract to run: {:x}", program.destination))?;
                 let program_data = dest_info.current_program_data();
                 dest_info.program_index += 1;
                 program_data
@@ -891,6 +928,9 @@ impl ContractExtractor {
             };
             (tree_clone, saved_program_index, program, program_data)
         };
+
+        self.handle_transfer(&program.sender, &contract.0, program.value);
+
         let config = Config::from(&self.run_config);
         let _result = match run_with_context(&config, &tree_clone, &program_data, self) {
             Ok(result) => result,
@@ -919,6 +959,26 @@ impl ContractExtractor {
         Ok(return_data)
     }
 
+    fn handle_transfer(&mut self, sender: &H160, destination: &H160, value: u64) {
+        // handle trasnfer
+        log::debug!(
+            ">> transfer {} wei from {:x} to {:x}",
+            value,
+            sender,
+            destination
+        );
+        if &self.tx_origin.0 == sender {
+            self.eoa_sub_balance(sender, value);
+        } else {
+            self.contract_sub_balance(&ContractAddress(sender.clone()), value);
+        }
+        if self.eoa_accounts.contains_key(destination) {
+            self.eoa_add_balance(destination, value);
+        } else {
+            self.contract_add_balance(&ContractAddress(destination.clone()), value);
+        }
+    }
+
     pub fn get_contract_changes(&self, number: u64) -> Vec<ContractChange> {
         self.script_groups
             .iter()
@@ -936,6 +996,50 @@ impl ContractExtractor {
             .values()
             .filter_map(|info| info.selfdestruct())
             .collect()
+    }
+
+    pub fn eoa_sub_balance(&mut self, address: &H160, value: u64) {
+        log::debug!("subbing {} value from eoa {:x}", value, address);
+        let input_balance = &mut self
+            .eoa_accounts
+            .get_mut(address)
+            .expect("eoa account not exists")
+            .0;
+        if *input_balance < value {
+            panic!("eoa sub balance faield: {} < {}", input_balance, value);
+        }
+        *input_balance -= value;
+    }
+    pub fn eoa_add_balance(&mut self, address: &H160, value: u64) {
+        log::debug!("adding {} value to eoa {:x}", value, address);
+        let input_balance = &mut self
+            .eoa_accounts
+            .get_mut(address)
+            .expect("eoa account not exists")
+            .0;
+        *input_balance += value;
+    }
+    pub fn contract_sub_balance(&mut self, address: &ContractAddress, value: u64) {
+        log::debug!("subbing {} value from contract {:x}", value, address.0);
+        let info = self
+            .script_groups
+            .get_mut(address)
+            .expect("contract account not exists");
+        if info.input_balance < value {
+            panic!(
+                "contract sub balance faield: {} < {}",
+                info.input_balance, value
+            );
+        }
+        info.input_balance -= value;
+    }
+    pub fn contract_add_balance(&mut self, address: &ContractAddress, value: u64) {
+        log::debug!("adding {} value to contract {:x}", value, address.0);
+        let info = self
+            .script_groups
+            .get_mut(address)
+            .expect("contract account not exists");
+        info.input_balance += value;
     }
 }
 
@@ -1024,10 +1128,24 @@ impl<Mac: SupportMachine> RunContext<Mac> for ContractExtractor {
                 let data_address = machine.registers()[A0].to_u64();
                 let data_length = machine.registers()[A1].to_u32();
                 let data = vm_load_data(machine, data_address, data_length)?;
-                self.script_groups
+                let address = H160::from_slice(&data).expect("parse selfdestruct H160");
+                let input_capacity = self
+                    .script_groups
+                    .get(&self.current_contract)
+                    .expect("selfdestruct account info")
+                    .input_capacity;
+                if self.eoa_accounts.contains_key(&address) {
+                    self.eoa_add_balance(&address, input_capacity);
+                } else {
+                    self.contract_add_balance(&ContractAddress(address), input_capacity);
+                }
+                let info = self
+                    .script_groups
                     .get_mut(&self.current_contract)
-                    .unwrap()
-                    .selfdestruct = Some(data.into());
+                    .expect("selfdestruct account info");
+                info.selfdestruct = Some(data.into());
+                info.input_balance = 0;
+                info.input_capacity = 0;
                 Ok(true)
             }
             // CALL
@@ -1043,13 +1161,13 @@ impl<Mac: SupportMachine> RunContext<Mac> for ContractExtractor {
                 msg_data_address += 8;
                 let msg_destination: H160 = vm_load_h160(machine, msg_data_address)?;
                 msg_data_address += 20;
-                let _sender: H160 = vm_load_h160(machine, msg_data_address)?;
+                let sender: H160 = vm_load_h160(machine, msg_data_address)?;
                 msg_data_address += 20;
                 let input_size: u32 = vm_load_u32(machine, msg_data_address)?;
                 msg_data_address += 4;
                 let _input_data: Vec<u8> = vm_load_data(machine, msg_data_address, input_size)?;
                 msg_data_address += input_size as u64;
-                let _value: H256 = vm_load_h256(machine, msg_data_address)?;
+                let _value: U256 = vm_load_u256(machine, msg_data_address)?;
 
                 let kind = CallKind::try_from(kind_value).unwrap();
 
@@ -1062,31 +1180,37 @@ impl<Mac: SupportMachine> RunContext<Mac> for ContractExtractor {
                     self.current_contract.0,
                     info_mut.program_index
                 );
-                let destination = info_mut.current_witness().calls[info_mut.current_call_index()]
-                    .0
-                    .clone();
+                let call_record =
+                    info_mut.current_witness().calls[info_mut.current_call_index()].clone();
                 *info_mut.current_call_index_mut() += 1;
                 if kind.is_call() {
                     assert_eq!(
-                        destination.0, msg_destination,
+                        call_record.destination, msg_destination,
                         "destination address not match"
                     );
                 };
-                let info_address = if kind.is_special_call() {
-                    self.current_contract.clone()
+
+                let (return_data, create_address) = if call_record.transfer_only {
+                    self.handle_transfer(&sender, &call_record.destination, call_record.value);
+                    (Default::default(), Default::default())
                 } else {
-                    destination.clone()
+                    let info_address = if kind.is_special_call() {
+                        self.current_contract.clone()
+                    } else {
+                        ContractAddress(call_record.destination.clone())
+                    };
+                    let saved_current_contract = self.current_contract.clone();
+                    let return_data = self
+                        .run_with(&info_address, kind.is_special_call())
+                        .map_err(|_err| VMError::Unexpected)?;
+                    let create_address = if kind.is_create() {
+                        ContractAddress(call_record.destination)
+                    } else {
+                        ContractAddress(H160::default())
+                    };
+                    self.current_contract = saved_current_contract;
+                    (return_data, create_address)
                 };
-                let saved_current_contract = self.current_contract.clone();
-                let return_data = self
-                    .run_with(&info_address, kind.is_special_call())
-                    .map_err(|_err| VMError::Unexpected)?;
-                let create_address = if kind.is_create() {
-                    destination
-                } else {
-                    ContractAddress(H160::default())
-                };
-                self.current_contract = saved_current_contract;
 
                 // Store return_data to VM memory
                 let result_data_address = machine.registers()[A0].to_u64();
@@ -1206,23 +1330,21 @@ impl<Mac: SupportMachine> RunContext<Mac> for ContractExtractor {
                 let address: H160 = vm_load_h160(machine, address_ptr)?;
                 let balance_ptr = machine.registers()[A1].to_u64();
                 let info_address = ContractAddress(address.clone());
-                // FIXME:
-                //   [x] get balance from current related contract account
-                //   [x] get balance from current unrelated(unchanged) contract account
-                //   [ ] get balance from EoA account
-                let balance_u128: u128 = if let Some(info) = self.script_groups.get(&info_address) {
+                let balance_u64: u64 = if let Some(info) = self.script_groups.get(&info_address) {
                     // get balance from current related contract account
-                    info.balance
+                    info.input_balance
                 } else {
-                    // FIXME: get balance from EoA account
-                    0
+                    self.eoa_accounts
+                        .get(&address)
+                        .expect("account not exists")
+                        .0
                 };
                 log::debug!(
                     "get_balance: address={:x}, balance={}",
                     address,
-                    balance_u128
+                    balance_u64
                 );
-                let balance = U256::from(balance_u128);
+                let balance = U256::from(balance_u64);
                 machine
                     .memory_mut()
                     .store_bytes(balance_ptr, &balance.to_be_bytes()[..])?;
