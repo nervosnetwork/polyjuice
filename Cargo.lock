@@ -1908,6 +1908,7 @@ name = "polyjuice"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "ckb-chain-spec",
  "ckb-hash",
  "ckb-jsonrpc-types",
  "ckb-simple-account-layer",

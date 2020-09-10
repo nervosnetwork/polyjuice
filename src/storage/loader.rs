@@ -5,7 +5,7 @@ use ckb_types::{
     core::{BlockView, EpochNumberWithFraction, HeaderView, ScriptHashType},
     packed,
     prelude::*,
-    H256, U256,
+    H160, H256, U256,
 };
 use rocksdb::DB;
 use std::collections::HashSet;
@@ -50,6 +50,27 @@ impl Loader {
             )
         })?;
         Ok((cell.output.into(), cell.data.unwrap().content.into_bytes()))
+    }
+
+    pub fn load_eoa_live_cell(
+        &mut self,
+        eoa_address: H160,
+    ) -> Result<(value::EoaLiveCell, packed::CellOutput, Bytes), String> {
+        let key_bytes = Bytes::from(&Key::EoaLiveCell(eoa_address.clone()));
+        let value = db_get::<_, value::EoaLiveCell>(&self.db, &key_bytes)?
+            .ok_or_else(|| format!("eoa live cell not found: {:x}", eoa_address))?;
+        let cell_with_status = self.client.get_live_cell(value.out_point().into(), true)?;
+        let cell = cell_with_status.cell.ok_or_else(|| {
+            format!(
+                "eoa cell is not live cell, tx_hash={:x}, output_index={}",
+                value.tx_hash, value.output_index
+            )
+        })?;
+        Ok((
+            value,
+            cell.output.into(),
+            cell.data.unwrap().content.into_bytes(),
+        ))
     }
 
     pub fn collect_cells(

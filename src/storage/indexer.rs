@@ -1,5 +1,7 @@
 use bincode::serialize;
-use ckb_jsonrpc_types::{JsonBytes, ScriptHashType};
+use ckb_chain_spec::consensus::TYPE_ID_CODE_HASH;
+use ckb_hash::new_blake2b;
+use ckb_jsonrpc_types::{CellOutput, JsonBytes, Script, ScriptHashType};
 use ckb_simple_account_layer::{run_with_context, CkbBlake2bHasher, Config, RunContext, RunResult};
 use ckb_types::{
     bytes::{BufMut, Bytes, BytesMut},
@@ -23,9 +25,10 @@ use std::time::Duration;
 use super::{db_get, value, Key, Loader};
 use crate::client::HttpRpcClient;
 use crate::types::{
-    account_balance, h256_to_smth256, parse_log, smth256_to_h256, vm_load_data, vm_load_h160,
-    vm_load_h256, vm_load_i32, vm_load_i64, vm_load_u32, vm_load_u8, CallKind, ContractAddress,
-    ContractChange, ContractMeta, EoaAddress, RunConfig, WitnessData,
+    cell_balance, contract_account_balance, h256_to_smth256, parse_log, smth256_to_h256,
+    vm_load_data, vm_load_h160, vm_load_h256, vm_load_i32, vm_load_i64, vm_load_u32, vm_load_u8,
+    CallKind, ContractAddress, ContractChange, ContractMeta, EoaAddress, RunConfig, WitnessData,
+    ONE_CKB,
 };
 
 pub const TYPE_ARGS_LEN: usize = 20;
@@ -59,8 +62,16 @@ impl Indexer {
                 core::ScriptHashType::try_from(self.run_config.type_script.hash_type()).unwrap();
             ScriptHashType::from(ty)
         };
+        let eoa_lock_code_hash: H256 = self.run_config.eoa_lock_script.code_hash().unpack();
+        let eoa_lock_hash_type = {
+            let ty = core::ScriptHashType::try_from(self.run_config.eoa_lock_script.hash_type())
+                .unwrap();
+            ScriptHashType::from(ty)
+        };
         log::info!("type code hash: {:x}", type_code_hash);
         log::info!("type hash type: {:?}", type_hash_type);
+        log::info!("eoa lock code hash: {:x}", eoa_lock_code_hash);
+        log::info!("eoa lock hash type: {:?}", eoa_lock_hash_type);
         let last_block_key_bytes = Bytes::from(&Key::Last);
         loop {
             let next_header = if let Some(value::Last { number, hash }) =
@@ -152,6 +163,13 @@ impl Indexer {
                             };
                             batch.put(&Bytes::from(&map_key), &serialize(&map_value).unwrap());
                         }
+                        for eoa_address in block_delta.eoa_added_cells {
+                            batch.delete(&Bytes::from(&Key::EoaLiveCell(eoa_address)));
+                        }
+                        for (eoa_address, value) in block_delta.eoa_removed_cells {
+                            let key = Key::EoaLiveCell(eoa_address);
+                            batch.put(&Bytes::from(&key), &serialize(&value).unwrap());
+                        }
                         for contract_address in block_delta.destructed_contracts {
                             let key_bytes =
                                 Bytes::from(&Key::ContractMeta(contract_address.clone()));
@@ -222,6 +240,8 @@ impl Indexer {
             let mut block_codes: Vec<ContractMeta> = Vec::new();
             let mut destructed_contracts: Vec<ContractAddress> = Vec::new();
 
+            let mut eoa_added_cells: HashSet<(H160, value::EoaLiveCell)> = HashSet::new();
+            let mut eoa_removed_cells: HashSet<(H160, value::EoaLiveCell)> = HashSet::new();
             let mut added_cells: HashSet<(H256, u32, u32, value::LockLiveCell)> = HashSet::new();
             let mut removed_cells: HashSet<(H256, u64, u32, u32, value::LockLiveCell)> =
                 HashSet::new();
@@ -274,6 +294,7 @@ impl Indexer {
                         );
                     }
                     let type_script = output.type_.clone().unwrap_or_default();
+                    let lock_script = output.lock.clone();
                     if data.len() == OUTPUT_DATA_LEN
                         && type_script.code_hash == type_code_hash
                         && type_script.hash_type == type_hash_type
@@ -297,9 +318,15 @@ impl Indexer {
                     let out_point = packed::OutPoint::from(input.previous_output.clone());
                     let prev_tx_hash = input.previous_output.tx_hash;
                     let prev_output_index = input.previous_output.index.value();
-                    let lock_hash: H256 = packed::Script::from(output.lock)
+                    let lock_hash: H256 = packed::Script::from(output.lock.clone())
                         .calc_script_hash()
                         .unpack();
+                    let is_eoa = is_eoa(
+                        &type_script,
+                        &lock_script,
+                        &eoa_lock_code_hash,
+                        &eoa_lock_hash_type,
+                    );
                     let value = value::LockLiveCell {
                         tx_hash: prev_tx_hash,
                         output_index: prev_output_index,
@@ -307,6 +334,7 @@ impl Indexer {
                         data_size: output_data_size,
                         type_script_hash: output
                             .type_
+                            .clone()
                             .map(packed::Script::from)
                             .map(|data| data.calc_script_hash().unpack()),
                     };
@@ -316,6 +344,17 @@ impl Indexer {
                                 .unwrap()
                                 .unwrap()
                         });
+                    if is_eoa {
+                        let (eoa_address, eoa_value) = eoa_record(
+                            &type_script,
+                            &lock_script,
+                            &tx_hash,
+                            prev_output_index as u32,
+                            &output,
+                            output_data_size,
+                        );
+                        eoa_removed_cells.insert((eoa_address, eoa_value));
+                    }
                     block_removed_cells.insert(value.clone());
                     removed_cells.insert((
                         lock_hash,
@@ -345,6 +384,7 @@ impl Indexer {
                         );
                     }
                     let type_script = output.type_.clone().unwrap_or_default();
+                    let lock_script = output.lock.clone();
                     if data.len() == OUTPUT_DATA_LEN
                         && type_script.code_hash == type_code_hash
                         && type_script.hash_type == type_hash_type
@@ -360,9 +400,15 @@ impl Indexer {
                         info.output =
                             Some((output_index, packed::CellOutput::from(output.clone())));
                     }
-                    let lock_hash: H256 = packed::Script::from(output.lock)
+                    let lock_hash: H256 = packed::Script::from(output.lock.clone())
                         .calc_script_hash()
                         .unpack();
+                    let is_eoa = is_eoa(
+                        &type_script,
+                        &lock_script,
+                        &eoa_lock_code_hash,
+                        &eoa_lock_hash_type,
+                    );
                     let value = value::LockLiveCell {
                         tx_hash: tx_hash.clone(),
                         output_index: output_index as u32,
@@ -370,6 +416,7 @@ impl Indexer {
                         data_size,
                         type_script_hash: output
                             .type_
+                            .clone()
                             .map(packed::Script::from)
                             .map(|data| data.calc_script_hash().unpack()),
                     };
@@ -380,6 +427,17 @@ impl Indexer {
                             tx_index: tx_index as u32,
                         },
                     );
+                    if is_eoa {
+                        let (eoa_address, eoa_value) = eoa_record(
+                            &type_script,
+                            &lock_script,
+                            &tx_hash,
+                            output_index as u32,
+                            &output,
+                            data_size,
+                        );
+                        eoa_added_cells.insert((eoa_address, eoa_value));
+                    }
                     added_cells.insert((lock_hash, tx_index as u32, output_index as u32, value));
                 }
 
@@ -498,6 +556,14 @@ impl Indexer {
                 batch.delete(&Bytes::from(&key));
                 batch.delete(&Bytes::from(&Key::LiveCellMap(value.out_point())));
             }
+            for (eoa_address, eoa_value) in eoa_added_cells.clone() {
+                let key = Key::EoaLiveCell(eoa_address);
+                batch.put(&Bytes::from(&key), &serialize(&eoa_value).unwrap());
+            }
+            for (eoa_address, _) in eoa_removed_cells.iter() {
+                let key = Key::EoaLiveCell(eoa_address.clone());
+                batch.delete(&Bytes::from(&key));
+            }
 
             // selfdestruct
             for contract_address in &destructed_contracts {
@@ -512,9 +578,14 @@ impl Indexer {
             }
             // Key::BlockDelta
             let block_delta = value::BlockDelta {
-                contracts: block_contracts.into_iter().collect::<Vec<_>>(),
-                added_cells: added_cells.into_iter().collect::<Vec<_>>(),
-                removed_cells: removed_cells.into_iter().collect::<Vec<_>>(),
+                contracts: block_contracts.into_iter().collect(),
+                added_cells: added_cells.into_iter().collect(),
+                removed_cells: removed_cells.into_iter().collect(),
+                eoa_added_cells: eoa_added_cells
+                    .into_iter()
+                    .map(|(eoa_address, _)| eoa_address)
+                    .collect(),
+                eoa_removed_cells: eoa_removed_cells.into_iter().collect(),
                 destructed_contracts,
             };
             let block_contracts_bytes = serialize(&block_delta).unwrap();
@@ -526,6 +597,42 @@ impl Indexer {
             self.db.write(batch).map_err(|err| err.to_string())?;
         }
     }
+}
+
+fn is_eoa(
+    type_script: &Script,
+    lock_script: &Script,
+    eoa_lock_code_hash: &H256,
+    eoa_lock_hash_type: &ScriptHashType,
+) -> bool {
+    type_script.code_hash == TYPE_ID_CODE_HASH
+        && type_script.hash_type == ScriptHashType::Type
+        && &lock_script.code_hash == eoa_lock_code_hash
+        && &lock_script.hash_type == eoa_lock_hash_type
+}
+
+fn eoa_record(
+    type_script: &Script,
+    lock_script: &Script,
+    tx_hash: &H256,
+    output_index: u32,
+    output: &CellOutput,
+    data_size: u32,
+) -> (H160, value::EoaLiveCell) {
+    let mut blake2b = new_blake2b();
+    blake2b.update(type_script.args.as_bytes());
+    blake2b.update(lock_script.args.as_bytes());
+    let mut result = [0u8; 32];
+    blake2b.finalize(&mut result);
+    let eoa_address = H160::from_slice(&result[0..20]).expect("convert to h160");
+    let packed_output = packed::CellOutput::from(output.clone());
+    let eoa_value = value::EoaLiveCell {
+        tx_hash: tx_hash.clone(),
+        output_index,
+        capacity: output.capacity.value(),
+        balance: cell_balance(&packed_output, (data_size as u64) * ONE_CKB),
+    };
+    (eoa_address, eoa_value)
 }
 
 // Extract eth contract changes from CKB transaction
@@ -619,7 +726,7 @@ impl ContractInfo {
             let balance: u64 = self
                 .output
                 .as_ref()
-                .map(|(_, output)| account_balance(output))
+                .map(|(_, output)| contract_account_balance(output))
                 .unwrap();
             Some(ContractMeta {
                 address: address.clone(),
@@ -651,7 +758,7 @@ impl ContractInfo {
                 .collect();
             let tx_origin = self.programs[0].program.tx_origin.clone();
             let capacity: u64 = output.capacity().unpack();
-            let balance: u64 = account_balance(&output);
+            let balance: u64 = contract_account_balance(&output);
             Some(ContractChange {
                 tx_origin,
                 address: address.clone(),

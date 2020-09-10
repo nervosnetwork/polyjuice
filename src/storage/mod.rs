@@ -47,9 +47,13 @@ pub enum KeyType {
     ///      => (TransactionHash, OutputIndex)
     LockLiveCell = 0x05,
 
+    /// EoA account cells
+    ///   EthAddress => (TransactionHash, OutputIndex)
+    EoaLiveCell = 0x06,
+
     /// Store meta info of a live cell outpoint
     ///   OutPoint => (BlockNumber, TransactionIndex)
-    LiveCellMap = 0x06,
+    LiveCellMap = 0x07,
 
     /// Delta in the block (for rollback)
     ///   BlockNumber => value::BlockDelta
@@ -66,7 +70,8 @@ impl TryFrom<u8> for KeyType {
             0x03 => Ok(KeyType::ContractLogs),
             0x04 => Ok(KeyType::ContractMeta),
             0x05 => Ok(KeyType::LockLiveCell),
-            0x06 => Ok(KeyType::LiveCellMap),
+            0x06 => Ok(KeyType::EoaLiveCell),
+            0x07 => Ok(KeyType::LiveCellMap),
             0xF0 => Ok(KeyType::BlockDelta),
             _ => Err(format!("Invalid KeyType {}", value)),
         }
@@ -102,6 +107,7 @@ pub enum Key {
         /// Output index in current transaction
         output_index: Option<u32>,
     },
+    EoaLiveCell(H160),
     LiveCellMap(packed::OutPoint),
     BlockDelta(BlockNumber),
 }
@@ -181,6 +187,11 @@ impl From<&Key> for Bytes {
                 let mut bytes = vec![KeyType::LockLiveCell as u8];
                 bytes.extend(lock_hash.as_bytes());
                 serialize_output_pos(&mut bytes, *number, *tx_index, *output_index);
+                bytes.into()
+            }
+            Key::EoaLiveCell(address) => {
+                let mut bytes = vec![KeyType::EoaLiveCell as u8];
+                bytes.extend(address.as_bytes());
                 bytes.into()
             }
             Key::LiveCellMap(out_point) => {
@@ -292,6 +303,11 @@ impl TryFrom<&[u8]> for Key {
                     output_index: Some(output_index),
                 })
             }
+            KeyType::EoaLiveCell => {
+                let eth_address =
+                    H160::from_slice(&content[0..20]).expect("deserialize eth address");
+                Ok(Key::EoaLiveCell(eth_address))
+            }
             KeyType::LiveCellMap => {
                 let out_point = packed::OutPoint::from_slice(content).unwrap();
                 Ok(Key::LiveCellMap(out_point))
@@ -308,7 +324,7 @@ impl TryFrom<&[u8]> for Key {
 pub mod value {
     use super::BlockNumber;
     use crate::types::{ContractAddress, EoaAddress};
-    use ckb_types::{bytes::Bytes, packed, prelude::*, H256};
+    use ckb_types::{bytes::Bytes, packed, prelude::*, H160, H256};
     use serde::{Deserialize, Serialize};
 
     /// Deserialize/Serialize use bincode
@@ -356,7 +372,20 @@ pub mod value {
         pub data_size: u32,
     }
 
+    #[derive(Debug, Clone, Deserialize, Serialize, Hash, Eq, PartialEq)]
+    pub struct EoaLiveCell {
+        pub tx_hash: H256,
+        pub output_index: u32,
+        pub capacity: u64,
+        pub balance: u64,
+    }
+
     impl LockLiveCell {
+        pub fn out_point(&self) -> packed::OutPoint {
+            packed::OutPoint::new(self.tx_hash.pack(), self.output_index)
+        }
+    }
+    impl EoaLiveCell {
         pub fn out_point(&self) -> packed::OutPoint {
             packed::OutPoint::new(self.tx_hash.pack(), self.output_index)
         }
@@ -377,6 +406,9 @@ pub mod value {
         pub added_cells: Vec<(H256, u32, u32, LockLiveCell)>,
         /// (lock_hash, number, tx_index, output_index)
         pub removed_cells: Vec<(H256, u64, u32, u32, LockLiveCell)>,
+        /// (eoa_address)
+        pub eoa_added_cells: Vec<H160>,
+        pub eoa_removed_cells: Vec<(H160, EoaLiveCell)>,
         /// The selfdestruct contracts in current block
         pub destructed_contracts: Vec<ContractAddress>,
     }
@@ -392,6 +424,7 @@ fn db_get<K: AsRef<[u8]>, T: DeserializeOwned>(db: &DB, key: K) -> Result<Option
 #[cfg(test)]
 mod test {
     use super::*;
+    use ckb_types::{h160, h256};
 
     #[test]
     fn test_key_serde() {
@@ -399,24 +432,28 @@ mod test {
             Key::Last,
             Key::BlockMap(3),
             Key::ContractChange {
-                address: Default::default(),
+                address: ContractAddress(h160!("0xab")),
                 number: Some(333),
                 tx_index: Some(2),
                 output_index: Some(64),
             },
             Key::ContractLogs {
-                address: Default::default(),
+                address: ContractAddress(h160!("0xab")),
                 number: Some(444),
                 tx_index: Some(3),
                 output_index: Some(64),
             },
-            Key::ContractMeta(Default::default()),
+            Key::ContractMeta(ContractAddress(h160!("0xef"))),
             Key::LockLiveCell {
-                lock_hash: Default::default(),
+                lock_hash: h256!("0x3344"),
                 number: Some(666),
                 tx_index: Some(4),
                 output_index: Some(55),
             },
+            Key::EoaLiveCell {
+                type_id_args: h256!("0x5342"),
+                anyone_can_pay_args: h160!("0xabcd"),
+            }
             Key::LiveCellMap(packed::OutPoint::default()),
             Key::BlockDelta(8),
         ] {

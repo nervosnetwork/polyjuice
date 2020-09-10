@@ -688,14 +688,17 @@ pub fn h256_to_smth256(hash: &H256) -> SmtH256 {
     SmtH256::from(buf)
 }
 
-pub fn account_balance(output: &packed::CellOutput) -> u64 {
+pub fn cell_balance(output: &packed::CellOutput, data_capacity: u64) -> u64 {
     let capacity: u64 = output.capacity().unpack();
-    let data_capacity = Capacity::shannons((32 + 32) * ONE_CKB);
     let occupied_capacity: u64 = output
-        .occupied_capacity(data_capacity)
+        .occupied_capacity(Capacity::shannons(data_capacity))
         .expect("capacity")
         .as_u64();
     capacity - occupied_capacity
+}
+
+pub fn contract_account_balance(output: &packed::CellOutput) -> u64 {
+    cell_balance(output, (32 + 32) * ONE_CKB)
 }
 
 pub fn load_u32(data: &[u8], offset: &mut usize) -> Result<u32, String> {
