@@ -10,7 +10,7 @@ That is also just our claim, as engineers we all know the famous quote "Talk is 
 - [x] Contract call contract
 - [x] Contract logs
 - [x] Read block information from contract
-- [ ] Value transfer
+- [x] Value transfer
 
 Polyjuice use [evmone](https://github.com/ethereum/evmone) as the EVM implementation in both `generator` and `validator`, all opcodes (if none is missing) are supported.
 
@@ -59,7 +59,12 @@ $ ckb miner
 
 ## Install ckb-cli / jq
 
-Since we need to sign secp256k1 sighash locked inputs in polyjuice generated transaction, we need a little help from `ckb-cli`. You need to download latest(version >= 0.33.1) ckb-cli from github [release page](https://github.com/nervosnetwork/ckb-cli/releases), and put in your `$PATH`, so polyjuice can find it.
+Since we need to sign secp256k1 sighash locked inputs in polyjuice generated transaction, we need a little help from `ckb-cli`. You need to build a special version of [ckb-cli](https://github.com/TheWaWaR/ckb-cli/tree/skip-check-to-address) (for support `type-id` and skip check to-address argument), and put in your `$PATH`, so polyjuice can find it.
+
+``` bash
+$ git clone https://github.com/TheWaWaR/ckb-cli/tree/skip-check-to-address
+$ cargo install -f --path .
+```
 
 Some actions depend on `jq` to show/edit json information. You may install [jq](https://stedolan.github.io/jq/download/) by:
 
@@ -122,7 +127,21 @@ $ ckb-cli wallet transfer \
 0x2222000000000000000000000000000000000000000000000000000000000000
 ```
 
-Running polyjuice require a config file to tell polyjuice the `validator`/`always_success` contract's out point and code hash. We use `ckb-cli` to calculate the code hash:
+Since we need an EoA(Externally Owned Account) account to send the transaction, we deploy a [anyone-can-pay](https://github.com/thewawar/ckb-anyone-can-pay) contract for EoA cell's lock script, for convenience we can use a pre-compiled binary in tests directory:
+
+```bash
+$ ckb-cli wallet transfer \
+        --privkey-path privkey-0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7 \
+        --to-address ckt1qyqdfjzl8ju2vfwjtl4mttx6me09hayzfldq8m3a0y \
+        --tx-fee 0.01 \
+        --capacity 60000 \
+        --to-data-path ./tests/anyone_can_pay
+
+# The transaction hash
+0x3333000000000000000000000000000000000000000000000000000000000000
+```
+
+Running polyjuice require a config file to tell polyjuice the `validator`/`always_success`/`anyone-can-pay` contract's out point and code hash. We use `ckb-cli` to calculate the code hash:
 
 ```bash
 # validator's code hash
@@ -132,6 +151,10 @@ $ ckb-cli util blake2b --binary-path ./c/build/validator
 # always_success's code hash
 $ ckb-cli util blake2b --binary-hex 0x7f454c460201010000000000000000000200f3000100000078000100000000004000000000000000980000000000000005000000400038000100400003000200010000000500000000000000000000000000010000000000000001000000000082000000000000008200000000000000001000000000000001459308d00573000000002e7368737472746162002e74657874000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000b000000010000000600000000000000780001000000000078000000000000000a0000000000000000000000000000000200000000000000000000000000000001000000030000000000000000000000000000000000000082000000000000001100000000000000000000000000000001000000000000000000000000000000
 0x28e83a1277d48add8e72fadaa9248559e1b632bab2bd60b27955ebc4c03800a5
+
+# anyone-can-pay's code hash
+$ ckb-cli util blake2b --binary-path ./tests/anyone_can_pay
+0xbbbb000000000000000000000000000000000000000000000000000000000000
 ```
 
 Then generate the config file:
@@ -140,6 +163,8 @@ Then generate the config file:
 $ VALIDATOR_TX_HASH=0x1111000000000000000000000000000000000000000000000000000000000000
 $ VALIDATOR_CODE_HASH=0xaaaa000000000000000000000000000000000000000000000000000000000000
 $ ALWAYS_SUCCESS_TX_HASH=0x2222000000000000000000000000000000000000000000000000000000000000
+$ ANYONE_CAN_PAY_TX_HASH=0x3333000000000000000000000000000000000000000000000000000000000000
+$ ANYONE_CAN_PAY_CODE_HASH=0xbbbb000000000000000000000000000000000000000000000000000000000000
 
 $ cat > run_config.json << _RUN_CONFIG_
 {
@@ -166,6 +191,18 @@ $ cat > run_config.json << _RUN_CONFIG_
         "code_hash": "0x28e83a1277d48add8e72fadaa9248559e1b632bab2bd60b27955ebc4c03800a5",
         "hash_type": "data",
         "args": "0x"
+    },
+    "eoa_lock_dep": {
+        "out_point": {
+            "tx_hash": "${ANYONE_CAN_PAY_TX_HASH}",
+            "index": "0x0"
+        },
+        "dep_type": "code"
+    },
+    "eoa_lock_script": {
+        "code_hash": "${ANYONE_CAN_PAY_CODE_HASH}",
+        "hash_type": "data",
+        "args": "0x"
     }
 }
 _RUN_CONFIG_
@@ -183,16 +220,30 @@ RUST_LOG=polyjuice=debug ./target/release/polyjuice run \
 
 We will use curl to interact with polyjuice. Default RPC server listen address is `localhost:8214`.
 
-### Create contract
+### Create EoA account
+Fisrt we need an EoA account to send transaction:
+```bash
+$ ./target/release/polyjuice new-eoa-account -k privkey-0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7 --balance 10000.0
 
-First, let's create an [ERC20](https://etherscan.io/address/0xc3761eb917cd790b30dad99f6cc5b4ff93c4f9ea) contract:
+[lock-arg]: 0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7
+[Command]: ckb-cli wallet transfer --privkey-path privkey-0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7 --to-address ckt1q293q9zd4ggsz5h83hgq9dz0g2fr3ja7uhnzq53qtlwx587zc4az4jpj324umxu73ej0h3txcsu9cw77kgvaway9qy9 --capacity 10126.0 --tx-fee 0.001 --type-id --skip-check-to-address
+tx-hash: 0x082a2c796a11b476be1ba8bbb8fab17fca7a1cd2167d58b5f21c62c52cabd4a9, output-index: 0
+[type_args]: a1b4eb8bf37c6894c11029ae7f3d542aea3bc0ddca1ce6a3580e07b536dc9cad
+[lock_args]: c8328aabcd9b9e8e64fbc566c4385c3bdeb219d7
+0xb16ac6204aef494c411ed9dcfd6909f8c2d74527
+```
+
+The EoA account address is int the last line, which is `0xb16ac6204aef494c411ed9dcfd6909f8c2d74527`.
+
+### Create contract
+Then, let's create an [ERC20](https://etherscan.io/address/0xc3761eb917cd790b30dad99f6cc5b4ff93c4f9ea) contract:
 
 ``` bash
 echo '{
     "id": 2,
     "jsonrpc": "2.0",
     "method": "create",
-    "params": ["0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7", "0x<the ERC20 contract binary>"]
+    "params": ["0xb16ac6204aef494c411ed9dcfd6909f8c2d74527", "0x<the ERC20 contract binary>", 0]
 }' \
 | tr -d '\n' \
 | curl -s -H 'content-type: application/json' -d @- http://localhost:8214 \
@@ -201,9 +252,9 @@ echo '{
 
 ```json
 {
-  "entrance_contract": "0x8c2eb9f3eb0f6ba73a2249fe8eeb02cafa7a25e0",
+  "entrance_contract": "0xfe68578683eb8deee4de1aca6c1ba8847c6d7691",
   "created_addresses": [
-    "0x8c2eb9f3eb0f6ba73a2249fe8eeb02cafa7a25e0"
+    "0xfe68578683eb8deee4de1aca6c1ba8847c6d7691"
   ],
   "destructed_addresses": [],
   "logs": [],
@@ -279,7 +330,7 @@ echo '{
 }
 ```
 
-The `entrance_contract` field which is `0x8c2eb9f3eb0f6ba73a2249fe8eeb02cafa7a25e0` here contrains the ERC20 contract address we will create. The following actions will require this value as argument.
+The `entrance_contract` field which is `0xfe68578683eb8deee4de1aca6c1ba8847c6d7691` here contrains the ERC20 contract address we will create. The following actions will require this value as argument.
 
 Then we sign the transaction use polyjuice:
 
@@ -318,7 +369,7 @@ echo '{
   "jsonrpc": "2.0",
   "result": [
     {
-      "address": "0x8c2eb9f3eb0f6ba73a2249fe8eeb02cafa7a25e0",
+      "address": "0xfe68578683eb8deee4de1aca6c1ba8847c6d7691",
       "block_number": 14,
       "code": "0x608060405260043 ... 9f64736f6c63430006060033",
       "code_hash": "0x8e92ee4326804b8c5b911ad1cf31b1b44269a1f89453329b5162e5b04ac2eade",
@@ -338,7 +389,7 @@ echo '{
     "id": 2,
     "jsonrpc": "2.0",
     "method": "get_change",
-    "params": ["0x8c2eb9f3eb0f6ba73a2249fe8eeb02cafa7a25e0", null]
+    "params": ["0xfe68578683eb8deee4de1aca6c1ba8847c6d7691", null]
 }' \
 | tr -d '\n' \
 | curl -s -H 'content-type: application/json' -d @- http://localhost:8214 \
@@ -350,7 +401,7 @@ echo '{
 {
   "jsonrpc": "2.0",
   "result": {
-    "address": "0x8c2eb9f3eb0f6ba73a2249fe8eeb02cafa7a25e0",
+    "address": "0xfe68578683eb8deee4de1aca6c1ba8847c6d7691",
     "is_create": true,
     "logs": [],
     "new_storage": [
@@ -379,7 +430,7 @@ echo '{
     "output_index": 0,
     "tx_hash": "0xedcede37f52fc402e021e17bf1cc1eb1b64cd4611e82dbe071440857ed375055",
     "tx_index": 1,
-    "tx_origin": "0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7"
+    "tx_origin": "0xb16ac6204aef494c411ed9dcfd6909f8c2d74527"
   },
   "id": 2
 }
@@ -396,9 +447,9 @@ echo '{
     "jsonrpc": "2.0",
     "method": "static_call",
     "params": [
-        "0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7",
-        "0x8c2eb9f3eb0f6ba73a2249fe8eeb02cafa7a25e0",
-        "0x70a08231000000000000000000000000c8328aabcd9b9e8e64fbc566c4385c3bdeb219d7"
+        "0xb16ac6204aef494c411ed9dcfd6909f8c2d74527",
+        "0xfe68578683eb8deee4de1aca6c1ba8847c6d7691",
+        "0x70a08231000000000000000000000000b16ac6204aef494c411ed9dcfd6909f8c2d74527"
     ]
 }' \
 | tr -d '\n' \
@@ -417,7 +468,19 @@ echo '{
 }
 ```
 
-Now, let's transfer `555` ERC20 token from `0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7` to `d4c85f3cb8a625d25febb5acdade5e5bf4824fda`. The args generated from ethabi will be `0xa9059cbb000000000000000000000000d4c85f3cb8a625d25febb5acdade5e5bf4824fda000000000000000000000000000000000000000000000000000000000000022b`.
+We need create another EoA account to transfer:
+
+```bash
+./target/release/polyjuice new-eoa-account -k privkey-0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7 --balance 10000.0
+[lock-arg]: 0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7
+[Command]: ckb-cli wallet transfer --privkey-path privkey-0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7 --to-address ckt1q293q9zd4ggsz5h83hgq9dz0g2fr3ja7uhnzq53qtlwx587zc4az4jpj324umxu73ej0h3txcsu9cw77kgvaway9qy9 --capacity 10126.0 --tx-fee 0.001 --type-id --skip-check-to-address
+tx-hash: 0xaaba80fc391641fc8590435335f2962d47b9caa181d408594ad61acfa668bad9, output-index: 0
+[type_args]: fc7514e6465efe5af146cb61aaf3d259896b05848ca0f40ebdf666053dc265c1
+[lock_args]: c8328aabcd9b9e8e64fbc566c4385c3bdeb219d7
+0x3d2a2c5afeb6ba873844581245325d7cbc890313
+```
+
+Now, let's transfer `555` ERC20 token from `0xb16ac6204aef494c411ed9dcfd6909f8c2d74527` to `0x3d2a2c5afeb6ba873844581245325d7cbc890313`. The args generated from ethabi will be `0xa9059cbb0000000000000000000000003d2a2c5afeb6ba873844581245325d7cbc890313000000000000000000000000000000000000000000000000000000000000022b`.
 
 First, we create a CKB transaction use polyjuice:
 
@@ -427,9 +490,10 @@ echo '{
     "jsonrpc": "2.0",
     "method": "call",
     "params": [
-        "0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7",
-        "0x8c2eb9f3eb0f6ba73a2249fe8eeb02cafa7a25e0",
-        "0xa9059cbb000000000000000000000000d4c85f3cb8a625d25febb5acdade5e5bf4824fda000000000000000000000000000000000000000000000000000000000000022b"
+        "0xb16ac6204aef494c411ed9dcfd6909f8c2d74527",
+        "0xfe68578683eb8deee4de1aca6c1ba8847c6d7691",
+        "0xa9059cbb0000000000000000000000003d2a2c5afeb6ba873844581245325d7cbc890313000000000000000000000000000000000000000000000000000000000000022b"
+        0,
     ]
 }' \
 | tr -d '\n' \
@@ -439,17 +503,17 @@ echo '{
 
 ```json
 {
-  "entrance_contract": "0x8c2eb9f3eb0f6ba73a2249fe8eeb02cafa7a25e0",
+  "entrance_contract": "0xfe68578683eb8deee4de1aca6c1ba8847c6d7691",
   "created_addresses": [],
   "destructed_addresses": [],
   "logs": [
     {
-      "address": "0x8c2eb9f3eb0f6ba73a2249fe8eeb02cafa7a25e0",
+      "address": "0xfe68578683eb8deee4de1aca6c1ba8847c6d7691",
       "data": "0x000000000000000000000000000000000000000000000000000000000000022b",
       "topics": [
         "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
-        "0x000000000000000000000000c8328aabcd9b9e8e64fbc566c4385c3bdeb219d7",
-        "0x000000000000000000000000d4c85f3cb8a625d25febb5acdade5e5bf4824fda"
+        "0x000000000000000000000000b16ac6204aef494c411ed9dcfd6909f8c2d74527",
+        "0x0000000000000000000000003d2a2c5afeb6ba873844581245325d7cbc890313"
       ]
     }
   ],
@@ -462,7 +526,7 @@ echo '{
 
 Then we sign the transaction use `polyjuice sign-tx` and send the transaction use `ckb-cli tx send`.
 
-Then we query the balance of `0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7` again:
+Then we query the balance of `0xb16ac6204aef494c411ed9dcfd6909f8c2d74527` again:
 
 ```bash
 echo '{
@@ -470,9 +534,9 @@ echo '{
     "jsonrpc": "2.0",
     "method": "static_call",
     "params": [
-        "0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7",
-        "0x8c2eb9f3eb0f6ba73a2249fe8eeb02cafa7a25e0",
-        "0x70a08231000000000000000000000000c8328aabcd9b9e8e64fbc566c4385c3bdeb219d7"
+        "0xb16ac6204aef494c411ed9dcfd6909f8c2d74527",
+        "0xfe68578683eb8deee4de1aca6c1ba8847c6d7691",
+        "0x70a08231000000000000000000000000b16ac6204aef494c411ed9dcfd6909f8c2d74527"
     ]
 }' \
 | tr -d '\n' \
@@ -501,7 +565,7 @@ To:
 0x000000000000000000000000000000000000000204fce5e3e2502610fffffdd5
 ```
 
-And query the balance of `0xd4c85f3cb8a625d25febb5acdade5e5bf4824fda`:
+And query the balance of `0x3d2a2c5afeb6ba873844581245325d7cbc890313`:
 
 ```bash
 echo '{
@@ -509,9 +573,9 @@ echo '{
     "jsonrpc": "2.0",
     "method": "static_call",
     "params": [
-        "0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7",
-        "0x8c2eb9f3eb0f6ba73a2249fe8eeb02cafa7a25e0",
-        "0x70a08231000000000000000000000000d4c85f3cb8a625d25febb5acdade5e5bf4824fda"
+        "0xb16ac6204aef494c411ed9dcfd6909f8c2d74527",
+        "0xfe68578683eb8deee4de1aca6c1ba8847c6d7691",
+        "0x70a082310000000000000000000000003d2a2c5afeb6ba873844581245325d7cbc890313"
     ]
 }' \
 | tr -d '\n' \
@@ -537,10 +601,10 @@ echo '{
 
 ``` rust
 /// Create a contract
-fn create(sender: H160, code: Bytes) -> TransactionReceipt;
+fn create(sender: H160, code: Bytes, value: u64) -> TransactionReceipt;
 
 /// Call a contract
-fn call(sender: H160, contract_address: H160, input: Bytes) -> TransactionReceipt;
+fn call(sender: H160, contract_address: H160, input: Bytes, value: u64) -> TransactionReceipt;
 
 /// Static call a contract
 fn static_call(sender: H160, contract_address: H160, input: Bytes) -> StaticCallResponse;
@@ -562,6 +626,9 @@ fn get_logs(
   filter_topics: Option<Vec<H256>>,
   limit: Option<u32>,
 ) -> Vec<LogInfo>;
+
+/// Get balance of an account
+fn get_balance(&self, address: H160) -> u64;
 ```
 
 ## Response data structures:
