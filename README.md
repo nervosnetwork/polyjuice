@@ -62,8 +62,9 @@ $ ckb miner
 Since we need to sign secp256k1 sighash locked inputs in polyjuice generated transaction, we need a little help from `ckb-cli`. You need to build a special version of [ckb-cli](https://github.com/TheWaWaR/ckb-cli/tree/skip-check-to-address) (for support `type-id` and skip check to-address argument), and put in your `$PATH`, so polyjuice can find it.
 
 ``` bash
-$ git clone https://github.com/TheWaWaR/ckb-cli/tree/skip-check-to-address
-$ cargo install -f --path .
+$ git clone -b skip-check-to-address https://github.com/TheWaWaR/ckb-cli
+$ cd ckb-cli
+$ cargo install --locked -f --path .
 ```
 
 Some actions depend on `jq` to show/edit json information. You may install [jq](https://stedolan.github.io/jq/download/) by:
