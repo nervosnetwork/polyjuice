@@ -1,5 +1,7 @@
 # Polyjuice
 
+> This is the deprecated standalone polyjuice implementation. See https://github.com/nervosnetwork/godwoken-polyjuice for godwoken polyjuice.
+
 Nervos CKB is built on the cell model, which is a generalized version of the UTXO model. There seems to be a belief in the blockchain world that UTXO model is hard to program on, while the account model is easier for developers. Although cell model is a descendant of UTXO model, it is perfectly [possible](https://xuejie.space/2020_03_20_what_do_we_mean_when_we_say_account_model/) to build account model on top of cell model. The secret here also lies in abstraction. While at the lower level UTXO-style design can help achieve parallelism, at the higher level an abstraction layer can expose exactly an account model to the everyday developers.
 
 That is also just our claim, as engineers we all know the famous quote "Talk is cheap. Show me the code." Following this principle, we designed and built polyjuice, which is an Ethereum compatible layer on top of Nervos CKB. Ethereum, up to this day, is probably the most used and flexible account model based blockchain. By polyjuice we want to showcase that it is perfectly possible to use account model on Nervos CKB. The flexibility here actually enables countless opportunities.
